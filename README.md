@@ -256,7 +256,7 @@ awg-quick up myvpn
 
 `awg-quick` does not configure TCP MSS clamping automatically. Without it, TCP packets may exceed the tunnel MTU and get fragmented.
 
-`install.sh` adds the following rule to `/etc/pf.conf` automatically:
+`install.sh` prints the rule but does **not** touch your firewall unless you pass `--pf`:
 
 ```
 match on awg scrub (max-mss 1380)
@@ -264,11 +264,13 @@ match on awg scrub (max-mss 1380)
 
 The value 1380 = tunnel MTU (1420) − IP header (20) − TCP header (20).
 
-If you installed the tools manually, add this rule yourself and reload pf:
+Add it yourself (recommended), or let the installer do it against an existing `/etc/pf.conf`:
 
 ```sh
 echo 'match on awg scrub (max-mss 1380)' >> /etc/pf.conf
 pfctl -f /etc/pf.conf
+# or:
+doas ./install.sh --tools-only --pf
 ```
 
 ## AWG obfuscation parameters
@@ -305,6 +307,45 @@ AmneziaWG 3.1 only (`Version = 3.1`):
 `HeaderProtectionKey`, `S1`–`S4`, `H1`–`H4` and `RandomTrailers` must match on both endpoints; `I1`–`I5`, junk packets, `ContentPaddingAddition` and the timings are local.
 
 The 3.1 mode also talks to AmneziaWG 2.x peers (`S3`, `S4`, `H1`–`H4` ranges, `I1`–`I5`) as long as the 3.x-only parameters are not set.
+
+## Security
+
+This driver parses packets from the network, so it is held to the same rules
+as `if_wg.c`: nothing is read before it is bounds-checked, and only
+authenticated packets touch peer state.
+
+Read [`SECURITY.md`](SECURITY.md) before deploying — it lists the threat model,
+the bounds that configuration values are now held to, the remaining known
+limitations, and how to report a problem privately.
+
+Two findings from the first audit are worth knowing about:
+
+- `S1`–`S4` were accepted up to 65535, which made the next handshake panic the
+  kernel (`panic: m_clget: request for 65807 byte cluster`). Values are now
+  capped at 1280 and rejected with `EINVAL` above that.
+- The installer used to rewrite `/etc/pf.conf`; it now only prints the MSS rule
+  unless you pass `--pf`.
+
+## Tested
+
+| Component | Version | Result |
+|---|---|---|
+| OpenBSD | 8.0 amd64 (GENERIC.MP) | builds with `-Werror`, kernel boots |
+| OpenBSD | 7.9 amd64 | builds |
+| AmneziaWG legacy 2.0 | Android/Windows client | handshake + data verified |
+| AmneziaWG 3.1 | `amneziawg-go` client | handshake + data verified (header protection, `I1`, `S3`/`S4`) |
+| Throughput, 1 vCPU / 1 GB server | `iperf3` | 350 Mbit/s up, 973 Mbit/s down (legacy, kernel↔kernel) |
+
+See [`docs/TESTING.md`](docs/TESTING.md) for the matrix, the negative tests that
+must not panic, and how to reproduce them. Upgrading the OS replaces `/bsd`;
+see [`docs/RUNBOOK-sysupgrade.md`](docs/RUNBOOK-sysupgrade.md).
+
+## Upstream
+
+This repository is a maintained fork of
+[`TrueBad0ur/awg-openbsd-kernel`](https://github.com/TrueBad0ur/awg-openbsd-kernel),
+kept in step with OpenBSD releases. Fixes are sent upstream as pull requests;
+the fork carries them until they land.
 
 ## Performance
 

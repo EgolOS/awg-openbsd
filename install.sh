@@ -215,27 +215,35 @@ setup_pf_mss() {
         return
     fi
 
-    if [ ! -f "$PF_CONF" ]; then
-        log "Creating $PF_CONF with MSS clamp rule"
-        printf 'set skip on lo\n\n# Clamp TCP MSS to awg MTU (1420 - 40 = 1380)\n%s\n\nblock return\npass\n' "$RULE" > "$PF_CONF"
+    # Never write a firewall policy for the operator. Adding "block return /
+    # pass" to a host that has no pf.conf would open it up; only edit a file
+    # that already exists, and only when explicitly asked.
+    if [ "$EDIT_PF" != yes ]; then
+        log "Suggested rule (not applied; rerun with --pf to add it):"
+        echo "        $RULE"
+        return
+    fi
+
+    [ -f "$PF_CONF" ] || die "$PF_CONF does not exist — create a policy first, then add: $RULE"
+
+    log "Adding MSS clamp rule to $PF_CONF"
+    cp -p "$PF_CONF" "$PF_CONF.awg.bak"
+    if grep -q '^set skip' "$PF_CONF"; then
+        awk -v rule="$RULE" '
+            /^set skip/ { print; found=1; next }
+            found && !/^set skip/ { print "\n# Clamp TCP MSS to awg MTU (1420 - 40 = 1380)"; print rule; found=0 }
+            { print }
+        ' "$PF_CONF" > "$PF_CONF.tmp" && mv "$PF_CONF.tmp" "$PF_CONF"
     else
-        log "Adding MSS clamp rule to $PF_CONF"
-        if grep -q '^set skip' "$PF_CONF"; then
-            awk -v rule="$RULE" '
-                /^set skip/ { print; found=1; next }
-                found && !/^set skip/ { print "\n# Clamp TCP MSS to awg MTU (1420 - 40 = 1380)"; print rule; found=0 }
-                { print }
-            ' "$PF_CONF" > "$PF_CONF.tmp" && mv "$PF_CONF.tmp" "$PF_CONF"
-        else
-            { printf '# Clamp TCP MSS to awg MTU (1420 - 40 = 1380)\n%s\n\n' "$RULE"; cat "$PF_CONF"; } > "$PF_CONF.tmp" \
-                && mv "$PF_CONF.tmp" "$PF_CONF"
-        fi
+        { printf '# Clamp TCP MSS to awg MTU (1420 - 40 = 1380)\n%s\n\n' "$RULE"; cat "$PF_CONF"; } > "$PF_CONF.tmp" \
+            && mv "$PF_CONF.tmp" "$PF_CONF"
     fi
 
     if pfctl -nf "$PF_CONF" 2>/dev/null; then
         pfctl -f "$PF_CONF" && log "pf reloaded with MSS clamp" || log "WARNING: pf reload failed — check $PF_CONF"
     else
-        log "WARNING: pf syntax check failed — rule not loaded, check $PF_CONF manually"
+        log "WARNING: pf syntax check failed — restoring $PF_CONF.awg.bak"
+        cp -p "$PF_CONF.awg.bak" "$PF_CONF"
     fi
 }
 
@@ -243,11 +251,13 @@ setup_pf_mss() {
 
 usage() {
     cat <<EOF
-Usage: $0 [--tools-only | --kernel-only | --all]
+Usage: $0 [--tools-only | --kernel-only | --all] [--pf]
 
   --tools-only   Patch ifconfig + install awg-quick (no reboot needed)
   --kernel-only  Build and install AWG kernel (requires reboot)
   --all          Install everything: tools + kernel (default)
+  --pf           Also add the MSS clamp rule to an existing /etc/pf.conf
+                 (default: print the rule and leave the firewall alone)
 
 After --all or --kernel-only: reboot to activate the AWG kernel.
 Place your config in /etc/amnezia/amneziawg/<name>.conf, then:
@@ -258,13 +268,17 @@ EOF
 }
 
 MODE=all
-case "${1:-}" in
-    --tools-only)  MODE=tools ;;
-    --kernel-only) MODE=kernel ;;
-    --all|"")      MODE=all ;;
-    -h|--help)     usage ;;
-    *) die "Unknown option: $1. Run $0 --help for usage." ;;
-esac
+EDIT_PF=no
+for arg in "$@"; do
+    case "$arg" in
+        --tools-only)  MODE=tools ;;
+        --kernel-only) MODE=kernel ;;
+        --all)         MODE=all ;;
+        --pf)          EDIT_PF=yes ;;
+        -h|--help)     usage ;;
+        *) die "Unknown option: $arg. Run $0 --help for usage." ;;
+    esac
+done
 
 check_root
 : > "$LOGFILE"

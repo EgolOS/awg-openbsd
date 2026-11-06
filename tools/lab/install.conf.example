@@ -1,0 +1,26 @@
+# autoinstall(8) response file for the lab VMs.
+# Copy to install.conf next to the ISO and replace both passwords.
+# The driver build test does not need ssh at all, but the smoke tests do.
+
+System hostname = obsd-a
+Password for root = CHANGE-ME
+Network interfaces = vio0
+IPv4 address for vio0 = dhcp
+IPv6 address for vio0 = none
+Nameservers = 10.0.2.3
+
+# The build tree lives on /home: /usr defaults to 2.9 GB and is too small.
+Use (W)hole disk or (E)dit the MBR = whole
+Disk = sd0
+Use (A)uto layout, (E)dit auto layout, or custom = auto
+
+Set name(s)? = done
+Location of sets = cd0
+Server = http://10.0.2.2:8000
+Set name(s)? = done
+Continue without verification = yes
+
+# A normal user with doas; root ssh with a locked password is refused.
+User name = lab
+Password for user lab = CHANGE-ME
+Allow root ssh login = no

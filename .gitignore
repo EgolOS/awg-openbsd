@@ -9,3 +9,9 @@
 # Misc
 ktrace.out
 *.out
+
+# Lab fixtures — never commit a response file or a disk image
+tools/lab/install.conf
+*.qcow2
+*.iso
+*.img

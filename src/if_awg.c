@@ -83,6 +83,7 @@
 #define AWG_MAX_UDP_WINDOW	1500	/* clamp: largest payload a tunnel MTU carries */
 #define AWG_MAX_PADDING		1280	/* S1-S4/S3/S4 upper bound (min IPv6 MTU) */
 #define AWG_MAX_JUNK		64	/* Jc upper bound; upstream recommends 4-12 */
+#define AWG_MAX_JUNK_SIZE	1500	/* junk packets are built in a 1500-byte buffer */
 #define AWG_MAX_UDP_PAYLOAD	65507
 
 #define AWGPRINTF(loglevel, sc, mtx, fmt, ...) do {		\
@@ -3059,6 +3060,26 @@ awg_ioctl_check(struct awg_softc *sc, struct awg_interface_io *io)
 			return EINVAL;
 	if (f & AWG_INTERFACE_HAS_JC && io->i_jc > AWG_MAX_JUNK)
 		return EINVAL;
+	/* Junk is built in a 1500-byte stack buffer; a larger Jmax makes the
+	 * driver send nothing at all, which is worse than refusing it. */
+	if (f & AWG_INTERFACE_HAS_JC && io->i_jmax > AWG_MAX_JUNK_SIZE)
+		return EINVAL;
+	/*
+	 * A keychain that expires before the next handshake can complete
+	 * rekeys on every packet. Only check when both values arrive in the
+	 * same call, the way awg-quick sends them.
+	 */
+	if ((f & (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
+	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT)) ==
+	    (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
+	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT)) {
+		int window = io->i_keepalive_timeout.r_hi +
+		    ((f & AWG_INTERFACE_HAS_REKEY_TIMEOUT) ?
+		    io->i_rekey_timeout.r_hi : awg_rekey_timeout(sc));
+		if (!awg_range_is_zero(io->i_reject_after_time) &&
+		    io->i_reject_after_time.r_hi <= window)
+			return EINVAL;
+	}
 	if (f & AWG_INTERFACE_HAS_HPK) {
 		for (has_hpk = 0, i = 0; i < AWG_HPK_LEN; i++)
 			has_hpk |= io->i_hpk[i];

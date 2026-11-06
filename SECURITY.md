@@ -35,6 +35,8 @@ What the driver does **not** protect against:
 | `I1`–`I5` were sent regardless of MTU | Fragmented signature packets | **Fixed**: packets above `if_mtu` are skipped |
 | `conf/files` attached shared crypto to `wg` only | `awg`-without-`wg` config links with undefined symbols | **Fixed**: entries are `wg \| awg` |
 | H1–H4 collisions in legacy mode are not rejected | A peer's response can be classified as an initiation | Open, matches the Linux module |
+| `Jmax` above 1500 was silently ignored | The driver sent no junk packets at all, so the fingerprint differed from the Linux peers | **Fixed**: rejected with `EINVAL` |
+| Timings were not cross-checked | `RejectAfterTime` ≤ keepalive + rekey made every packet rekey | **Fixed**: rejected when both arrive in one call |
 | Obfuscation fields are read without a lock | A reconfiguration can drop packets mid-update | Open, documented in the source |
 
 ## Hardening checklist for deployments

@@ -21,17 +21,17 @@ anything up to a few hundred Mbit/s.
 vmctl console <vm>          # from the host, or the provider's console link
 ```
 
-Log in as `root`, then:
+Log in as `root` (or the provider account), then:
 
 ```sh
 # a normal user with doas beats root ssh (root ssh needs a password here)
-useradd -m -G wheel aigeus
-passwd aigeus
+useradd -m -G wheel <user>
+passwd <user>
 
 # key-based ssh only
-mkdir -p /home/aigeus/.ssh && chmod 700 /home/aigeus/.ssh
-echo '<your public key>' > /home/aigeus/.ssh/authorized_keys
-chown -R aigeus:aigeus /home/aigeus/.ssh && chmod 600 /home/aigeus/.ssh/authorized_keys
+mkdir -p /home/<user>/.ssh && chmod 700 /home/<user>/.ssh
+echo '<your public key>' > /home/<user>/.ssh/authorized_keys
+chown -R <user>:<user> /home/<user>/.ssh && chmod 600 /home/<user>/.ssh/authorized_keys
 
 echo 'permit persist :wheel' > /etc/doas.conf
 chmod 600 /etc/doas.conf

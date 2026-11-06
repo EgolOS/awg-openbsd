@@ -11,6 +11,29 @@ Two protocol versions are supported, selected per interface (see [Protocol versi
 
 AWG parameters are configured directly through `ifconfig(8)` — the same tool used for standard WireGuard on OpenBSD — with no external helper binary required.
 
+## Quick start
+
+On a fresh OpenBSD 8.0/7.9 amd64 install, as root or with `doas`:
+
+```sh
+doas pkg_add git bash
+git clone https://github.com/EgolOS/awg-openbsd
+cd awg-openbsd
+doas sh install.sh --all     # kernel + ifconfig + awg-quick, 35-50 min on 1 vCPU
+doas reboot
+uname -v                     # AWG.MP#<n>
+doas sh tools/gen-config.sh --endpoint vpn.example.com:51820
+```
+
+Then put the server half of that output in `/etc/amnezia/amneziawg/vpn.conf`
+(mode 0600), `doas awg-quick up vpn`, and import the client half into the
+AmneziaWG app. Full walkthrough including the firewall: [`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md).
+
+This fork carries security fixes that are not in the upstream tree yet — see
+[`SECURITY.md`](SECURITY.md) for the list and [`docs/TESTING.md`](docs/TESTING.md)
+for how they are tested. The upstream pull request is
+[#2](https://github.com/TrueBad0ur/awg-openbsd-kernel/pull/2).
+
 ## How it works
 
 | Component | Role |
@@ -35,13 +58,14 @@ Interfaces are named `awg0`, `awg1`, … Configs live in `/etc/amnezia/amneziawg
 ## Installation
 
 ```sh
-git clone https://github.com/TrueBad0ur/awg-openbsd-kernel
-cd awg-openbsd-kernel
+git clone https://github.com/EgolOS/awg-openbsd
+cd awg-openbsd
 
 # 1. Patch ifconfig + install awg-quick (fast, no reboot)
 doas sh install.sh --tools-only
 
-# 2. Build and install the AWG kernel (takes ~15 min, requires reboot)
+# 2. Build and install the AWG kernel (15 min on a fast machine,
+#    35-50 min on a 1 vCPU VPS; requires reboot)
 doas sh install.sh --kernel-only
 
 # Or do both in one shot:

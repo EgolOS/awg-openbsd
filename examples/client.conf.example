@@ -1,0 +1,26 @@
+# Client config — import into the AmneziaWG app, or drop it in
+# /etc/amnezia/amneziawg/ and `awg-quick up <name>` on another OpenBSD host.
+#
+# Every obfuscation value must match the server exactly, or the handshake is
+# silently dropped.
+
+[Interface]
+PrivateKey = <client-private-key>
+Address = 10.8.0.2/32
+
+Jc = 4
+Jmin = 10
+Jmax = 50
+S1 = 26
+S2 = 33
+H1 = 112341189
+H2 = 2916506422
+H3 = 2995209257
+H4 = 964445889
+
+[Peer]
+PublicKey = <server-public-key>
+PresharedKey = <preshared-key>
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25

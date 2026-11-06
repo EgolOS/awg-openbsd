@@ -331,10 +331,14 @@ Two findings from the first audit are worth knowing about:
 | Component | Version | Result |
 |---|---|---|
 | OpenBSD | 8.0 amd64 (GENERIC.MP) | builds with `-Werror`, kernel boots |
-| OpenBSD | 7.9 amd64 | builds |
+| OpenBSD | 7.9 amd64 | `if_awg.c` and `awg_noise.c` compile clean against the 7.9 sources |
 | AmneziaWG legacy 2.0 | Android/Windows client | handshake + data verified |
 | AmneziaWG 3.1 | `amneziawg-go` client | handshake + data verified (header protection, `I1`, `S3`/`S4`) |
 | Throughput, 1 vCPU / 1 GB server | `iperf3` | 350 Mbit/s up, 973 Mbit/s down (legacy, kernel↔kernel) |
+
+Deploying on a VPS (kernel build, pf policy, tunnel, sysupgrade survival):
+[`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md). `tools/gen-config.sh` prints a
+matching server/client config pair with fresh keys.
 
 See [`docs/TESTING.md`](docs/TESTING.md) for the matrix, the negative tests that
 must not panic, and how to reproduce them. Upgrading the OS replaces `/bsd`;

@@ -1,0 +1,37 @@
+# Server config — /etc/amnezia/amneziawg/vpn.conf (mode 0600)
+#
+# Values for Jc/Jmin/Jmax/S1-S4/H1-H4 must match the client exactly.
+# Generate a matching pair with: doas sh tools/gen-config.sh
+
+[Interface]
+PrivateKey = <server-private-key>
+Address = 10.8.0.1/24
+ListenPort = 51820
+
+# Obfuscation (legacy AmneziaWG 2.0 — works with every client)
+Jc = 4
+Jmin = 10
+Jmax = 50
+S1 = 26
+S2 = 33
+H1 = 112341189
+H2 = 2916506422
+H3 = 2995209257
+H4 = 964445889
+
+[Peer]
+PublicKey = <client-public-key>
+PresharedKey = <preshared-key>
+AllowedIPs = 10.8.0.2/32
+
+# --- AmneziaWG 3.1 (only if every client supports it) -------------------
+# Version = 3.1
+# S3 = 24
+# S4 = 24
+# HeaderProtectionKey = <32 bytes, base64>
+# I1 = <b 0x...>
+# ContentPaddingAddition = 1-16
+# RandomTrailers = yes
+# RekeyAfterTime = 120
+# RejectAfterTime = 180
+# KeepaliveTimeout = 25

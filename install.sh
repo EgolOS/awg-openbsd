@@ -121,8 +121,9 @@ install_ifconfig() {
 install_awg_quick() {
     step "awg-quick"
 
-    install -m 755 "$REPODIR/sbin/awg-quick" /usr/bin/awg-quick
-    log "awg-quick installed to /usr/bin/awg-quick"
+    install -d -o root -g wheel -m 755 /usr/local/sbin
+    install -m 755 -o root -g wheel "$REPODIR/sbin/awg-quick" /usr/local/sbin/awg-quick
+    log "awg-quick installed to /usr/local/sbin/awg-quick"
 }
 
 # ── 5. AWG kernel driver ──────────────────────────────────────────────────────

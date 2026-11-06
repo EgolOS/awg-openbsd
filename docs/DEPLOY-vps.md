@@ -131,7 +131,9 @@ doas chmod 600 /etc/amnezia/amneziawg/vpn.conf
 doas awg-quick up vpn
 ```
 
-`awg-quick` prints the interface state; verify with `doas ifconfig awg0` and
+`awg-quick` lives in `/usr/local/sbin` (base system paths belong to the OS, not
+to a script we install). It prints the interface state; verify with
+`doas ifconfig awg0` and
 `doas awg-quick show vpn`. Handshake counters stay at zero until a client
 connects — that is normal.
 

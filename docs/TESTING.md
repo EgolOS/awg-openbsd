@@ -57,6 +57,17 @@ ifconfig awg1 awgpeer <peer-key> awgaip 10.8.9.2/32 awgendpoint 10.9.0.2 51998
 ping -c 1 10.8.9.2      # pre-fix: kernel panics here
 ```
 
+## Known quirks found while testing
+
+- On a 3.1 interface with `HeaderProtectionKey`, changing one of `S1`/`S2`
+  alone is refused (`SIOCSAWG: Invalid argument`) because `ifconfig` zeroes the
+  companion field and the driver rejects `S < 12` with header protection on.
+  Set all four S values in one command, as `awg-quick` does.
+- Root ssh with a locked password is refused even when the key is accepted;
+  use a normal user with `doas`.
+- A panic drops the machine into `ddb`; hard-killing qemu there can leave the
+  filesystem inconsistent. Rebuild the disk if userland starts core dumping.
+
 ## Interoperability
 
 | Client | Status |

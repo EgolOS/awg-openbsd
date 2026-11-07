@@ -50,11 +50,12 @@ jobs:
       - name: assert awg-openbsd.patch is current
         run: sh generate-patch.sh --check
 
-  # Real kernel build. Only runs on a registered self-hosted runner with the
-  # label `openbsd`; on a repo with no such runner registered, GitHub queues
-  # this job forever -- that is the accepted trade-off for keeping the artefact
-  # real. continue-on-error: false, so a failed kernel build fails the run.
+  # Real kernel build. Needs a self-hosted runner labelled `openbsd`; a job
+  # that waits for a runner nobody registered keeps the whole run "queued"
+  # forever, so it is gated on a repository variable instead. Set
+  # OPENBSD_RUNNER=true (Settings -> Variables) once the runner exists.
   kernel:
+    if: vars.OPENBSD_RUNNER == 'true'
     runs-on: [self-hosted, openbsd]
     continue-on-error: false
     timeout-minutes: 45

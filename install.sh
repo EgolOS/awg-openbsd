@@ -47,11 +47,9 @@ verify_release_file() {		# verify_release_file <filename>
     sig="$WORK/SHA256.sig"
     [ -f "$sig" ] || ftp -o "$sig" "$CDN/$ver/SHA256.sig" \
         || die "cannot fetch $CDN/$ver/SHA256.sig — refusing to build from unverified sources"
-    ( cd "$WORK" && signify -C -p "$key" -x "$sig" ) > "$WORK/sigcheck.log" 2>&1 || true
-    grep -q 'Signature Verified' "$WORK/sigcheck.log" \
-        || die "$name: SHA256.sig did not verify against $key"
-    grep -q "^$name: OK$" "$WORK/sigcheck.log" \
-        || die "$name: signature check failed (see $WORK/sigcheck.log)"
+    sh "$REPODIR/tools/verify-release.sh" "$key" "$sig" "$WORK/$name" \
+        >> "$LOGFILE" 2>&1 \
+        || die "$name: signature or checksum verification failed (see $LOGFILE)"
     log "Verified $name against $key"
 }
 
@@ -96,6 +94,21 @@ fetch_sys_sources() {
         || die "$SRCDIR is OpenBSD $srcver, system is $(uname -r): move $SRCDIR and $IFCFG_SRC aside and rerun to fetch matching sources"
 }
 
+# Compare the pristine ifconfig file, not a CVS revision mistaken for an OS
+# release. A patched tree must retain its matching original for this check.
+verify_ifconfig_source() {
+    local tree=$1 manifest=$2 original expected actual
+    original="$tree/ifconfig.c"
+    if grep -Eq 'A_AMNEZIAWG|awgversion' "$original"; then
+        original="$tree/ifconfig.c.orig"
+    fi
+    [ -f "$manifest" ] && [ -f "$original" ] || die "ifconfig source identity unavailable"
+    expected=$(awk '$2 == "sbin/ifconfig/ifconfig.c" {print $1}' "$manifest")
+    actual=$(sha256 -q "$original") || die "cannot hash ifconfig source"
+    [ -n "$expected" ] && [ "$actual" = "$expected" ] \
+        || die "ifconfig source identity mismatch: move stale sources aside and fetch the recorded release"
+}
+
 # ── 3. ifconfig patch ─────────────────────────────────────────────────────────
 
 install_ifconfig() {
@@ -111,7 +124,7 @@ install_ifconfig() {
         local srcver
         srcver=$(sed -n 's/^osr="\(.*\)"$/\1/p' "$SRCDIR/conf/newvers.sh")
         [ "$srcver" = "$(uname -r)" ] \
-            || log "WARNING: $SRCDIR is OpenBSD $srcver, system is $(uname -r)"
+            || die "$SRCDIR is OpenBSD $srcver, system is $(uname -r): refusing mixed sources"
     fi
 
     # Fetch ifconfig sources from CDN if not present
@@ -129,26 +142,25 @@ install_ifconfig() {
         log "ifconfig sources extracted to $IFCFG_SRC"
     fi
 
-    # Install if_awg.h into system include path (needed to compile ifconfig)
-    cp "$REPODIR/src/if_awg.h" /usr/include/net/if_awg.h
-
-    # Apply patch (idempotent: check if already patched)
-    if grep -q 'awgversion' "$IFCFG_SRC/ifconfig.c" 2>/dev/null; then
-        log "ifconfig.c already patched"
-    else
-        if grep -q 'A_AMNEZIAWG' "$IFCFG_SRC/ifconfig.c" 2>/dev/null; then
-            # Patched by a release without AWG 3.1 support: start over
-            [ -f "$IFCFG_SRC/ifconfig.c.orig" ] \
-                || die "ifconfig.c has an old AWG patch and no ifconfig.c.orig to restore"
-            log "Replacing old AWG patch in ifconfig.c"
-            cp "$IFCFG_SRC/ifconfig.c.orig" "$IFCFG_SRC/ifconfig.c"
-        else
-            cp "$IFCFG_SRC/ifconfig.c" "$IFCFG_SRC/ifconfig.c.orig"
-        fi
-        log "Patching ifconfig.c"
-        patch "$IFCFG_SRC/ifconfig.c" "$PATCH" \
-            || die "patch failed — ifconfig.c may differ from expected version"
+    verify_ifconfig_source "$IFCFG_SRC" "$REPODIR/tools/upstream/$(uname -r).sha256"
+    # Stage from the verified original and require an exact patch application.
+    local original="$IFCFG_SRC/ifconfig.c"
+    if grep -Eq 'A_AMNEZIAWG|awgversion' "$original"; then
+        original="$IFCFG_SRC/ifconfig.c.orig"
     fi
+    cp "$original" "$WORK/ifconfig.c"
+    patch -C -F 0 "$WORK/ifconfig.c" "$PATCH" \
+        || die "ifconfig patch does not match the recorded source"
+    patch -F 0 "$WORK/ifconfig.c" "$PATCH" || die "ifconfig patch failed"
+    if [ "$original" != "$IFCFG_SRC/ifconfig.c" ]; then
+        cmp -s "$WORK/ifconfig.c" "$IFCFG_SRC/ifconfig.c" \
+            || die "ifconfig has an old/local patch: preserve it elsewhere before rebuilding"
+    else
+        cp "$original" "$IFCFG_SRC/ifconfig.c.orig"
+        cp "$WORK/ifconfig.c" "$IFCFG_SRC/ifconfig.c"
+    fi
+    # No base headers are changed until source identity/patch gates pass.
+    cp "$REPODIR/src/if_awg.h" /usr/include/net/if_awg.h
 
     # Build and install
     log "Building ifconfig"
@@ -350,13 +362,11 @@ check_plan() {
     fi
 
     if [ -f "$IFCFG_SRC/ifconfig.c" ]; then
-        ifcfg_ver=$(sed -n 's/.*OpenBSD \([0-9.]*\).*/\1/p' "$IFCFG_SRC/ifconfig.c" | head -1)
-        if [ -n "$ifcfg_ver" ] && [ "$ifcfg_ver" != "$ver" ]; then
-            printf 'ifconfig src  : %s is from %s, running %s (patch would be wrong)\n' \
-                "$IFCFG_SRC" "$ifcfg_ver" "$ver"
-            rc=1
+        if (verify_ifconfig_source "$IFCFG_SRC" "$REPODIR/tools/upstream/$ver.sha256"); then
+            printf 'ifconfig src  : recorded %s baseline\n' "$ver"
         else
-            printf 'ifconfig src  : %s\n' "$IFCFG_SRC"
+            printf 'ifconfig src  : identity check FAILED\n'
+            rc=1
         fi
     else
         printf 'ifconfig src  : not present, would be downloaded\n'

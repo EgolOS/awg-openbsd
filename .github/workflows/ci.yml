@@ -1,17 +1,6 @@
-# CI for awg-openbsd.
-#
-# Two jobs, on two kinds of runner:
-#
-#   checks   GitHub-hosted ubuntu-latest. Runs the host-side checks that work
-#            anywhere: shell syntax, python compile, the publish (secret) scan
-#            and the generated-patch freshness check -- i.e. `make check`.
-#   kernel   A self-hosted runner labelled `openbsd`. The kernel build itself
-#            needs a real OpenBSD system; a ubuntu runner cannot do it.
-#
-# No secrets are referenced anywhere: the workflow declares
-# `permissions: contents: read` and every pull request run gets exactly that --
-# read access to the repository and nothing else.
-
+# Untrusted pull requests execute only on disposable GitHub-hosted runners.
+# Kernel builds are an explicit operator action in a disposable OpenBSD lab.
+# Do not register a persistent privileged runner for this workflow.
 name: build
 
 on:
@@ -19,84 +8,23 @@ on:
     branches: [main]
   pull_request:
 
-# Contents is the only permission any job needs; no secrets.
 permissions:
   contents: read
 
 jobs:
-  # Host-side validation. Everything here runs on any POSIX host with make,
-  # sh and python3 -- the kernel is not involved.
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-
-      # `make check` chains check-syntax (sh -n), check-py (py_compile),
-      # check-scan (tools/publish-scan.py, fails on any secret-scan hit) and
-      # check-patch (generate-patch.sh --check, fails when awg-openbsd.patch
-      # is stale relative to src/). make stops on the first failing target,
-      # so a scan hit or a stale patch fails the build.
+      - name: Install offline signature-test tool
+        run: sudo apt-get update && sudo apt-get install -y signify-openbsd
       - name: make check
         run: make check
-
-      # Redundant explicit assertion of patch currency: a stale generated
-      # patch ships a driver older than src/, so assert it independently of
-      # the make target.
       - name: assert awg-openbsd.patch is current
         run: sh generate-patch.sh --check
-
-  # Real kernel build. Needs a self-hosted runner labelled `openbsd`; a job
-  # that waits for a runner nobody registered keeps the whole run "queued"
-  # forever, so it is gated on a repository variable instead. Set
-  # OPENBSD_RUNNER=true (Settings -> Variables) once the runner exists.
-  kernel:
-    if: vars.OPENBSD_RUNNER == 'true'
-    runs-on: [self-hosted, openbsd]
-    continue-on-error: false
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
-      # install.sh fetches sys.tar.gz from the CDN itself, but a tarball
-      # vendored next to the checkout is verified first. signify(1) checks it
-      # against the release's SHA256.sig and the stock /etc/signify key; a
-      # missing key or a bad signature is fatal, matching install.sh.
-      - name: Verify source tarball with signify (if present)
-        run: |
-          set -eu
-          ver=$(uname -r)
-          key="/etc/signify/openbsd-$(echo "$ver" | tr -d '.')-base.pub"
-          [ -f "$key" ] || { echo "missing signify key $key" >&2; exit 1; }
-          for tarball in sys.tar.gz src.tar.gz; do
-              [ -f "$tarball" ] || continue
-              [ -f SHA256.sig ] || { echo "missing SHA256.sig for $tarball" >&2; exit 1; }
-              signify -C -p "$key" -x SHA256.sig
-              grep -q "^$tarball: OK$"
-              echo "verified $tarball against $key"
-          done
-
-      # The real flag of install.sh is --build-only: it fetches/uses the
-      # kernel sources, runs `config AWG.MP` and builds in
-      # /usr/src/sys/arch/amd64/compile/AWG.MP, verifies the artifact
-      # (ELF, size, awg_encap symbol) and does not touch /bsd. install.sh
-      # must run as root, so the runner needs root (or a doas wrapper).
-      - name: Build kernel (install.sh --build-only)
-        run: sh install.sh --build-only
-
-      # The build host's own version. It is what the artefact is valid for,
-      # not the built kernel's ident: config(8) stamps the ident at link time
-      # and `uname -v` on the runner reports the running kernel.
-      - name: Record the build host's uname -v
-        run: uname -v > uname-v.txt
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: awg-kernel
-          path: |
-            /usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd
-            uname-v.txt

@@ -124,7 +124,7 @@ def main():
     baseline = []
     bad = 0
     for rel, want in sorted(entries.items()):
-        path = tree / rel
+        path = (tree.parent / rel) if rel.startswith("sbin/") else (tree / rel)
         if not path.is_file():
             baseline.append({"file": rel, "state": "missing"})
             bad += 1

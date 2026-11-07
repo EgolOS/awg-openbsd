@@ -14,5 +14,6 @@ f6bd83b0f8d43c744ad497213b6f53cee422d7a51e5faf8b07238991ea23e0d7  net/wg_cookie.
 b31ce4398f66dc8b5c8f87bda29093d900019f0c08c49b80ae244229e9d2d74e  crypto/blake2s.c
 c7d3e7bff0f4d553422f7797cc52a53be5d0895753f63e8b28ff77c172720185  crypto/curve25519.c
 87e49a2f75750f9e4d82530ae6cf4d2e0a0e5d5a6440a58cb3aa6ffaca553c13  crypto/chachapoly.c
+fd0e627d27513adb18a1461ca54722ccd84893450e376ec451c7ff1c261b33d0  crypto/chacha_private.h
 # the file the ifconfig patch is applied to; a mismatch means the patch context is stale
-98badbbbb05c706fd1fc65e0b9b66fe5bdcd0272de974c0fd7dc8b00533d052d  sbin/ifconfig/ifconfig.c
+6266edbd533c0789383678a50fa22e859693f1f64b37cb42e656e1f02c6e4e34  sbin/ifconfig/ifconfig.c

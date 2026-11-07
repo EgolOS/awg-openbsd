@@ -39,6 +39,11 @@ they are the gate this matrix refers to.
 | `tools/lab/wire-test.sh` | receive path against zero-length, short, oversized (65 000 B) and structurally wrong datagrams; interface must stay usable |
 | `tools/lab/matrix-test.sh` | every parameter at its bound, plus the interdependent rules (`jmin>jmax`, `H` range overlap, `S<12` with header protection, `reject <= keepalive+rekey`, `I1` descriptors) |
 | `tools/lab/stress-test.sh` | 200 version switches, parameter churn and peer add/remove while traffic flows |
+| `tools/lab/interop-test.sh` | **two VMs**: 3.1 handshake over a real link, ICMP through the tunnel, 8 MiB bulk transfer, counters |
+
+`make check-interop` drives the two-VM test from the host (`A_SSH`, `B_SSH`,
+`LAN_A`, `LAN_B`). It is not part of `make check-vm`: it needs `obsd-b` running
+the AWG kernel and both VMs on the lab LAN (`vio1`, 192.168.99.0/24).
 
 The malformed-input cases are the ones that produced
 `panic: m_clget: request for 65807 byte cluster` before the bounds were added,

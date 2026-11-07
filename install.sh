@@ -172,8 +172,12 @@ install_awg_quick() {
 
 # ── 5. AWG kernel driver ──────────────────────────────────────────────────────
 
-install_kernel() {
+# Build only: the artifact stays in the compile directory and /bsd is not
+# touched. Used by CI and by anyone who wants to inspect a kernel before it
+# becomes the boot kernel.
+kernel_build() {
     step "AWG kernel driver"
+
 
     log "Copying driver files to $SRCDIR/net/"
     cp "$REPODIR/src/if_awg.h"    "$SRCDIR/net/if_awg.h"
@@ -232,9 +236,140 @@ install_kernel() {
     log "Building kernel — this takes ~15 minutes"
     cd "$SRCDIR/arch/amd64/compile/AWG.MP"
     make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee -a "$LOGFILE"
-    make install
+}
+
+# Refuse a compiled kernel that cannot be the AWG kernel: wrong file type, a
+# size that is not a kernel, or no awg(4) symbols in it. `make install` would
+# happily put any of those on /bsd.
+verify_kernel_artifact() {		# verify_kernel_artifact <path>
+    local k=$1 size
+    [ -f "$k" ] || die "kernel artifact missing: $k"
+    # BSD head has no -c; dd+od is the portable check for 7f 45 4c 46.
+    [ "$(dd if="$k" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] \
+        || die "$k is not an ELF file — build failed and left something else"
+    size=$(stat -f %z "$k")
+    [ "$size" -gt 5242880 ] \
+        || die "$k is $size bytes — too small to be a kernel"
+    nm -n "$k" 2>/dev/null | grep -q ' awg_encap$' \
+        || die "$k has no awg_encap symbol — the AWG driver is not linked in"
+    log "Verified $k ($size bytes, awg symbols present)"
+}
+
+# config(8) puts the objects (and the linked bsd) under obj/; `make install`
+# finds them there, but a script that copies the artifact must not assume it.
+kernel_object_path() {
+    echo "$SRCDIR/arch/amd64/compile/AWG.MP/obj/bsd"
+}
+
+build_kernel_only() {
+    kernel_build
+    verify_kernel_artifact "$(kernel_object_path)"
+    log "Kernel built: $(kernel_object_path)"
+    log "/bsd was not touched. Install with: sh $0 --kernel-only"
+}
+
+install_kernel() {
+    local bsd
+
+    kernel_build
+    bsd=$(kernel_object_path)
+    verify_kernel_artifact "$bsd"
+
+    # Stage, then replace. A build that dies half-way must leave the running
+    # kernel alone; the copy is verified again after the swap.
+    log "Staging kernel to /bsd.awg-staging"
+    cp "$bsd" /bsd.awg-staging || die "could not stage the kernel"
+    chmod 700 /bsd.awg-staging
+    chown root:wheel /bsd.awg-staging
+
+    if [ -f /bsd ]; then
+        log "Keeping the kernel being replaced as /bsd.awg-prev"
+        cp -p /bsd /bsd.awg-prev || die "could not save /bsd"
+        # The bootloader falls back to /obsd; keep it in step with the backup.
+        ln -f /bsd /obsd 2>/dev/null || cp -p /bsd /obsd 2>/dev/null || true
+    fi
+
+    install -F -m 700 /bsd.awg-staging /bsd || die "could not install /bsd"
+    rm -f /bsd.awg-staging
+    cmp -s "$bsd" /bsd || die "/bsd does not match the built kernel after install"
+    sha256 -h /var/db/kernel.SHA256 /bsd 2>/dev/null \
+        || log "warning: could not update /var/db/kernel.SHA256 (syspatch will ask to rebuild it)"
 
     log "Kernel installed to /bsd — reboot to activate"
+    log "If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh $0 --rollback"
+}
+
+rollback_kernel() {
+    local failed
+
+    step "Rollback to the previous kernel"
+    [ -f /bsd.awg-prev ] \
+        || die "no /bsd.awg-prev to roll back to — boot /obsd from the bootloader instead"
+
+    if cmp -s /bsd /bsd.awg-prev; then
+        log "/bsd already matches /bsd.awg-prev — nothing to do"
+        return 0
+    fi
+    failed="/bsd.failed.$(date +%Y%m%d%H%M%S)"
+    cp -p /bsd "$failed" 2>/dev/null && log "Current kernel kept as $failed"
+    install -F -m 700 /bsd.awg-prev /bsd || die "could not restore /bsd"
+    sha256 -h /var/db/kernel.SHA256 /bsd 2>/dev/null || true
+    cmp -s /bsd.awg-prev /bsd || die "/bsd does not match the restored kernel"
+    log "Previous kernel restored — reboot to activate it"
+}
+
+# Report what an install would do and stop. Nothing is written, so this is safe
+# to run on a production box before a maintenance window.
+check_plan() {
+    local rc=0 key ver ifcfg_ver
+
+    step "Pre-flight check"
+    ver=$(uname -r)
+    printf 'os            : %s %s (%s)\n' "$(uname -s)" "$ver" "$(uname -m)"
+    [ "$(uname -m)" = amd64 ] || { printf 'arch          : unsupported (amd64 only)\n'; rc=1; }
+
+    key="/etc/signify/openbsd-$(echo "$ver" | tr -d '.')-base.pub"
+    if [ -f "$key" ]; then
+        printf 'signify key   : %s\n' "$key"
+    else
+        printf 'signify key   : MISSING %s (source verification will fail)\n' "$key"
+        rc=1
+    fi
+
+    if [ -f "$SRCDIR/net/if_wg.c" ]; then
+        printf 'kernel source : %s\n' "$SRCDIR"
+    else
+        printf 'kernel source : not present, would be downloaded to %s\n' "$SRCDIR"
+    fi
+
+    if [ -f "$IFCFG_SRC/ifconfig.c" ]; then
+        ifcfg_ver=$(sed -n 's/.*OpenBSD \([0-9.]*\).*/\1/p' "$IFCFG_SRC/ifconfig.c" | head -1)
+        if [ -n "$ifcfg_ver" ] && [ "$ifcfg_ver" != "$ver" ]; then
+            printf 'ifconfig src  : %s is from %s, running %s (patch would be wrong)\n' \
+                "$IFCFG_SRC" "$ifcfg_ver" "$ver"
+            rc=1
+        else
+            printf 'ifconfig src  : %s\n' "$IFCFG_SRC"
+        fi
+    else
+        printf 'ifconfig src  : not present, would be downloaded\n'
+    fi
+
+    printf 'running kernel: %s\n' "$(uname -v)"
+    if [ -f /bsd.awg-prev ]; then
+        printf 'rollback      : /bsd.awg-prev present\n'
+    else
+        printf 'rollback      : none yet (the first install keeps the current /bsd)\n'
+    fi
+    printf 'disk free     : %s\n' "$(df -h / | awk 'NR==2 {print $4}')"
+
+    printf '\nplan: %s\n' \
+        'fetch+verify sources, copy src/ into the tree, patch conf/files, config AWG.MP,'
+    printf '      %s\n' \
+        'build, verify the artifact, stage it, keep /bsd as /bsd.awg-prev, install, reboot.'
+    [ "$rc" -eq 0 ] || printf '\nresult: %s\n' 'a precondition above would fail — fix it before running --kernel-only'
+    [ "$rc" -eq 0 ] && printf '\nresult: ready\n'
+    exit "$rc"
 }
 
 # ── 6. Config directory ───────────────────────────────────────────────────────
@@ -298,13 +433,19 @@ setup_pf_mss() {
 
 usage() {
     cat <<EOF
-Usage: $0 [--tools-only | --kernel-only | --all] [--pf]
+Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | --all] [--pf]
 
+  --check        Report what would be done and stop (nothing is changed)
   --tools-only   Patch ifconfig + install awg-quick (no reboot needed)
+  --build-only   Build the kernel and stop; /bsd is not touched
   --kernel-only  Build and install AWG kernel (requires reboot)
   --all          Install everything: tools + kernel (default)
+  --rollback     Put the previous /bsd back (see /bsd.awg-prev)
   --pf           Also add the MSS clamp rule to an existing /etc/pf.conf
                  (default: print the rule and leave the firewall alone)
+
+The kernel is staged and verified before /bsd is replaced, and the kernel it
+replaces is kept as /bsd.awg-prev so --rollback works without the bootloader.
 
 After --all or --kernel-only: reboot to activate the AWG kernel.
 Place your config in /etc/amnezia/amneziawg/<name>.conf, then:
@@ -320,6 +461,9 @@ for arg in "$@"; do
     case "$arg" in
         --tools-only)  MODE=tools ;;
         --kernel-only) MODE=kernel ;;
+        --build-only)  MODE=build ;;
+        --rollback)    MODE=rollback ;;
+        --check)       MODE=check ;;
         --all)         MODE=all ;;
         --pf)          EDIT_PF=yes ;;
         -h|--help)     usage ;;
@@ -341,6 +485,16 @@ case "$MODE" in
     kernel)
         fetch_sys_sources
         install_kernel
+        ;;
+    build)
+        fetch_sys_sources
+        build_kernel_only
+        ;;
+    rollback)
+        rollback_kernel
+        ;;
+    check)
+        check_plan
         ;;
     all)
         install_packages

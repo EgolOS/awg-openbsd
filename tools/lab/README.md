@@ -12,6 +12,7 @@ compiles the kernel inside the guest.
 | `install_vm.py` | boots the ISO, answers `bsd.rd` over serial, runs the autoinstall |
 | `start_vm.sh` | starts a VM: user-mode NIC for ssh/http + a private L2 socket between the pair |
 | `build-in-vm.sh` | fetches `sys.tar.gz` + `driver.tgz` from the host, builds `AWG.MP` and the patched `ifconfig` |
+| `interop-test.sh` | two VMs, tunnel over the LAN link: handshake, ping, 8 MiB transfer |
 | `smoke-test.sh` | PASS/FAIL gate inside the guest: bounds, key handling, handshake over loopback, malformed input |
 | `serial_read.py` | dumps the serial console to a file — the only way to read a panic after the fact |
 
@@ -54,3 +55,8 @@ doas sh build-in-vm.sh               # inside the guest, tree on /home
 - A panic drops to `ddb`; killing qemu there can leave the filesystem
   inconsistent (`Floating point exception (core dumped)` from userland on the
   next boot). Rebuild the disk if that happens.
+- A fresh install can end up with host keys that `sshd` refuses
+  (`sshd: no hostkeys available`, `ssh-keygen -y` reports *invalid format*).
+  Fix inside the guest: `rm -f /etc/ssh/ssh_host_* && ssh-keygen -A &&
+  rcctl start sshd`. The install itself is fine; only the key files are bad.
+- `ping` on OpenBSD has no `-W`; use `-w <seconds>` for a total deadline.

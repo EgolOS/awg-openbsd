@@ -17,6 +17,9 @@ LAB_VM_HOST ?= 127.0.0.1
 LAB_VM_PORT ?= 2201
 LAB_SSH_KEY ?= $(HOME)/.hermes/cache/scratch/awg-lab/lab_ed25519
 LAB_VM_USER ?= lab
+LAB_VM_PORT_B ?= 2202
+LAN_A ?= 192.168.99.1
+LAN_B ?= 192.168.99.2
 TREE        ?= /usr/src/sys
 
 SSH  = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -24,7 +27,7 @@ SSH  = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 SCP  = scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
        -i $(LAB_SSH_KEY) -P $(LAB_VM_PORT)
 
-.PHONY: check check-syntax check-py check-scan check-patch check-vm baseline clean
+.PHONY: check check-syntax check-py check-scan check-patch check-vm check-interop baseline manifest clean
 
 check: check-syntax check-py check-scan check-patch
 	@echo "repository checks: OK"
@@ -61,8 +64,31 @@ check-vm:
 	done
 	@echo "lab tests: all cases passed"
 
+# Two-VM interop: a real tunnel between obsd-a and obsd-b over their LAN link.
+# Needs two VMs running the AWG kernel with vio1 configured (tools/lab/README.md).
+A_SSH ?= $(SSH) $(LAB_VM_USER)@$(LAB_VM_HOST) doas
+B_SSH ?= ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+         -o ConnectTimeout=10 -i $(LAB_SSH_KEY) -p $(LAB_VM_PORT_B) doas \
+         $(LAB_VM_USER)@$(LAB_VM_HOST) --
+check-interop:
+	@A_SSH='$(A_SSH)' B_SSH='$(B_SSH)' \
+	    LAN_A=$(LAN_A) LAN_B=$(LAN_B) sh tools/lab/interop-test.sh
+
 baseline:
 	@$(PYTHON) tools/upstream-diff.py --tree $(TREE)
+
+# Release metadata for a built kernel: hashes, versions, test results.
+#   make manifest KERNEL=/usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd \
+#       RELEASE=8.0 COMMIT=$(git rev-parse --short HEAD) TESTS="smoke=pass"
+KERNEL  ?= /usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd
+RELEASE ?= $(shell uname -r)      # OpenBSD release the kernel is built for
+KVER    ?= awg-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+COMMIT  ?= unknown
+TESTS   ?=
+manifest:
+	@$(PYTHON) tools/release-manifest.py --repo . --kernel $(KERNEL) \
+	    --release $(RELEASE) --version $(KVER) --commit $(COMMIT) \
+	    $(foreach t,$(TESTS),--tests $(t))
 
 clean:
 	@rm -rf tools/__pycache__ tools/lab/__pycache__

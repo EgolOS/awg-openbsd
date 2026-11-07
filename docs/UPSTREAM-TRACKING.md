@@ -16,7 +16,7 @@ procedure for moving the baseline forward.
 | Release | OpenBSD 8.0 (amd64) |
 | Source | `https://cdn.openbsd.org/pub/OpenBSD/8.0/sys.tar.gz` |
 | Recorded | 2026-11-07 |
-| Manifest | `tools/upstream/8.0.sha256` (SHA-256 of every file the port depends on) |
+| Manifest | `tools/upstream/8.0.sha256` (SHA-256 of every file the port depends on, including `sbin/ifconfig/ifconfig.c`, the file the patch is applied to) |
 | Driver commit | `f43535e` |
 
 The manifest is the baseline. It exists so that a divergence report can state
@@ -129,7 +129,7 @@ Do this in a scratch copy, never in the tree a running server builds from.
 | `net/wg_cookie.c` | cookie validation; `DisableCookies` bypasses this path |
 | `crypto/blake2s.c`, `crypto/curve25519.c`, `crypto/chachapoly.c` | used directly by the handshake |
 | `conf/files` | attribute wiring; the `| awg` patch depends on the exact lines |
-| `sbin/ifconfig/ifconfig.c` | the AWG keywords live in a patch against this file |
+| `sbin/ifconfig/ifconfig.c` | the AWG keywords live in a patch against this file; its digest is in the manifest, so a re-rolled patch can be checked against the tree it expects |
 
 A change to any of the first five requires a kernel rebuild. A change to
 `ifconfig.c` requires rebuilding and reinstalling `ifconfig` as well — the

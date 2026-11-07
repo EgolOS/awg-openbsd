@@ -26,20 +26,32 @@ FAILED=0
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=$((FAILED + 1)); }
 
-# rsh <side> <command>: run a command on A or B
+# rsh <side> <command>: run a command on A or B.
+# The command goes over stdin to a remote `sh -s`, so quoting is parsed exactly
+# once (by the remote shell) instead of being mangled by ssh + doas + make.
 rsh() {
 	side=$1; shift
 	case "$side" in
-	A) ${A_SSH:-sh -c} "$*" ;;
-	B) ${B_SSH:-sh -c} "$*" ;;
+	A) printf '%s\n' "$*" | ${A_SSH:-sh} ;;
+	B) printf '%s\n' "$*" | ${B_SSH:-sh} ;;
 	esac
 }
 
 cleanup() {
 	rsh A 'ifconfig awg0 destroy' >/dev/null 2>&1
 	rsh B 'ifconfig awg0 destroy' >/dev/null 2>&1
+	# pf stays disabled on purpose: re-enabling it loads the stock "block
+	# return all" ruleset, which kills the ssh session this script runs over.
+	# Turn it back on yourself: doas pfctl -e
 }
 trap cleanup EXIT
+
+# The stock pf.conf passes TCP only ("block return all" + "pass all flags
+# S/SA"), so ICMP and the tunnel's UDP would be dropped before the driver sees
+# them. A lab VM is not a firewall test: disable pf for the duration and turn
+# it back on in cleanup. Never do this on a server.
+rsh A 'pfctl -d' >/dev/null 2>&1
+rsh B 'pfctl -d' >/dev/null 2>&1
 
 # Public keys must match the private keys above; deriving them needs the
 # userspace helper, so the test takes them from the same place awg-quick does.
@@ -75,11 +87,17 @@ rsh B "ifconfig awg0 awgport $PORT_B awgpeer $PUB_A awgaip $TUN_A/32 \
 pass "both ends configured (3.1, junk, S1-S4)"
 
 echo "== 2. handshake across the LAN"
+# Nothing is sent until there is traffic: no PersistentKeepalive is configured
+# on purpose, so one datagram is enough to trigger the initiation.
+rsh A "ping -c 1 -w 2 $TUN_B >/dev/null 2>&1 || true"
 i=0
 hs_a=no; hs_b=no
 while [ "$i" -lt 15 ]; do
 	hs_a=$(rsh A "ifconfig awg0 | grep -c 'last handshake'")
 	hs_b=$(rsh B "ifconfig awg0 | grep -c 'last handshake'")
+	# A handshake that completed but has no traffic yet still shows as rx > 0.
+	[ "$hs_a" -gt 0 ] || hs_a=$(rsh A "ifconfig awg0 | awk '/rx:/{print (\$4 > 0)}'")
+	[ "$hs_b" -gt 0 ] || hs_b=$(rsh B "ifconfig awg0 | awk '/rx:/{print (\$4 > 0)}'")
 	[ "$hs_a" -gt 0 ] && [ "$hs_b" -gt 0 ] && break
 	i=$((i + 1))
 	sleep 1
@@ -96,10 +114,11 @@ fi
 
 echo "== 4. bulk transfer through the tunnel"
 # B listens, A sends 8 MiB of zeros, both timed on A.
-rsh B "nc -l -p 5201 > /dev/null &" >/dev/null 2>&1
+rsh B "nc -l -p 5201 > /dev/null 2>&1 </dev/null &
+sleep 1" >/dev/null 2>&1 </dev/null
 sleep 1
 start=$(date +%s)
-if rsh A "dd if=/dev/zero bs=65536 count=128 2>/dev/null | nc -N $TUN_B 5201"; then
+if rsh A "dd if=/dev/zero bs=65536 count=128 2>/dev/null | nc -N -w 5 $TUN_B 5201"; then
 	:
 fi
 end=$(date +%s)
@@ -118,7 +137,12 @@ tx_a=$(rsh A "ifconfig awg0 | sed -n 's/.*tx: \\([0-9]*\\).*/\\1/p' | head -1")
 [ -n "$tx_a" ] && [ "$tx_a" -gt 0 ] && pass "A transmit counter: $tx_a bytes" || \
     fail "A transmit counter did not move"
 
+# The listener's ssh session would otherwise keep the pipe open and hold the
+# caller (make) after the report is printed.
+rsh B "pkill -f 'nc -l -p 5201'" >/dev/null 2>&1 </dev/null
+
 echo
+echo "note: pf stays disabled on both VMs (enabling it drops this ssh session)"
 if [ "$FAILED" -eq 0 ]; then
 	echo "RESULT: interop passed"
 	exit 0

@@ -66,10 +66,12 @@ check-vm:
 
 # Two-VM interop: a real tunnel between obsd-a and obsd-b over their LAN link.
 # Needs two VMs running the AWG kernel with vio1 configured (tools/lab/README.md).
-A_SSH ?= $(SSH) $(LAB_VM_USER)@$(LAB_VM_HOST) doas
-B_SSH ?= ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-         -o ConnectTimeout=10 -i $(LAB_SSH_KEY) -p $(LAB_VM_PORT_B) doas \
-         $(LAB_VM_USER)@$(LAB_VM_HOST) --
+# Both sides run the commands through `doas sh -s` so the test can pipe a
+# script over ssh instead of quoting it through make, ssh and doas.
+SSH_OPTS = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           -o ConnectTimeout=10 -i $(LAB_SSH_KEY)
+A_SSH ?= ssh $(SSH_OPTS) -p $(LAB_VM_PORT) $(LAB_VM_USER)@$(LAB_VM_HOST) doas sh -s
+B_SSH ?= ssh $(SSH_OPTS) -p $(LAB_VM_PORT_B) $(LAB_VM_USER)@$(LAB_VM_HOST) doas sh -s
 check-interop:
 	@A_SSH='$(A_SSH)' B_SSH='$(B_SSH)' \
 	    LAN_A=$(LAN_A) LAN_B=$(LAN_B) sh tools/lab/interop-test.sh

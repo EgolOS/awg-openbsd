@@ -30,9 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -59,7 +59,7 @@ jobs:
     continue-on-error: false
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # install.sh fetches sys.tar.gz from the CDN itself, but a tarball
       # vendored next to the checkout is verified first. signify(1) checks it
@@ -93,7 +93,7 @@ jobs:
       - name: Record the build host's uname -v
         run: uname -v > uname-v.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: awg-kernel
           path: |

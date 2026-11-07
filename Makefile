@@ -32,11 +32,13 @@ SCP  = scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 check: check-syntax check-py check-scan check-patch
 	@echo "repository checks: OK"
 
+# awg-quick is bash (arrays, [[ ]]); install.sh and the lab scripts are POSIX
+# sh. Checking them all with one shell is how CI caught a false failure: dash
+# rejects bash syntax, so `sh -n sbin/awg-quick` fails on a correct script.
 check-syntax:
 	@sh -n install.sh
-	@sh -n sbin/awg-quick
-	@sh -n tools/lab/smoke-test.sh
-	@sh -n tools/lab/build-in-vm.sh
+	@bash -n sbin/awg-quick
+	@for f in tools/lab/*.sh; do sh -n "$$f" || exit 1; done
 	@echo "shell syntax: OK"
 
 check-py:

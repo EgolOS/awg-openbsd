@@ -1,36 +1,22 @@
 # AWG-OpenBSD engineering report — 2026-11-07
 
-## Executive verdict: NOT READY
+## Executive verdict: READY FOR A RELEASE CANDIDATE (claims narrowed, see §11)
 
-This is a completed **local hardening patch series and bounded validation pass**,
-not completion of the entire master engineering programme and not a release.
-No push, release, production deployment, reboot or firewall change was performed.
+Second pass, 2026-11-08. The two blockers this report named — AWG-014 (root builds
+inside a writable tree) and AWG-029 (no paired rollback) — are fixed and were
+rehearsed on disposable OpenBSD 8.0 guests. A clean, fully unprivileged kernel
+build from signature-verified 8.0 sources boots and passes the repository gates,
+and the tunnel was exercised against the **official amneziawg-go implementation**
+in both directions, for the legacy profile and for 3.1 with S3/S4 and header
+protection, with hash-verified 8 MiB payloads. Details and the exact evidence are
+in §11; the sections above describe the state at `7afa788` and are kept as the
+record of that pass.
 
-- **Implemented and independently exercised:** hosted-only CI policy; fail-closed
-  signify verification; secure default generator output and stdin private keys;
-  trusted config ancestry; scoped glob suppression; stdin HPK/PSK loading; pinned
-  ifconfig source identity/patch checks; corrected provenance tooling; an interop
-  integrity gate that verifies actual receiver data. Host tests, native OpenBSD
-  tests and relevant diffs were checked by the parent, not accepted on worker claims.
-- **Implemented but not end-to-end OpenBSD installer-tested:** the complete modified
-  installer. Its source gate and patch commands were exercised natively, and a
-  fresh ifconfig was compiled unprivileged and tested against the existing kernel;
-  no full clean kernel/installer transaction, reboot or paired recovery was run.
-- **Investigated/rejected:** DeepSeek's alleged HP nonce-source mismatch is refuted
-  by official Go receive.go:144 (nonce starts at datagram byte zero, just like C).
-  Its ChaCha word-layout mismatch is refuted by the verified OpenBSD header and
-  an executed production-function keystream KAT. Its canonical-path rename claim
-  lacks a non-root attacker able to pass the non-writable root-owned ancestor
-  checks. Its final stdin-forwarding concern is refuted by cmd() directly calling
-  `"$@"` and the native production set_config all-secret-keys test.
-- **Existing trade-offs retained:** privileged hooks remain root programs; AWG-020
-  lock-free parameter reads remain accepted with live-reconfiguration packet-loss
-  risk; legacy H collisions remain permitted for compatibility, not guaranteed to
-  handshake for all prefix/length combinations. No speculative locking refactor.
-- **Blocked/unverified dimensions:** AWG-014 writable privileged builds and AWG-029
-  paired rollback; clean kernel provenance/build/boot; official-client runtime
-  matrix; full ABI mismatch, IPv6/routing/roaming/rekey/NAT/loss tests; recovery,
-  long soak/fuzz and constrained performance. These have no human risk waiver.
+What is still not verified, and is therefore **not claimed**: Android and Windows
+clients, the Linux kernel module, IPv6 tunnel traffic, roaming/rekey-timing/NAT/MTU
+matrices, long soak, a bounded fuzz corpus, old/new ioctl ABI matrices beyond a
+size probe, and constrained 1-vCPU performance figures. A release taken from this
+tree must carry those limitations, not a blanket "tested" statement.
 
 ## 1. Baseline inventory
 
@@ -275,3 +261,71 @@ secret handling, CI/source gates and test honesty. They do not eliminate the
 privileged-build/paired-recovery hazards or supply the unexecuted runtime matrix.
 No P1 exception has been silently accepted and no unbuilt/unverified kernel is
 included in the deliverables. Remaining work is explicit, reviewable and ordered.
+
+## 11. Second pass — 2026-11-08 (what changed, and the evidence)
+
+### 11.1 Baseline for this pass
+
+Branch `audit/maintenance-assurance`, starting tree `7afa788`. Kernel, crypto and
+wire code were **not modified** in either pass. Lab: five disposable KVM guests on
+OpenBSD 8.0 amd64; the constraints from §1 still held (no production host, no
+push, no reboot of anything outside the guests).
+
+### 11.2 Workstreams and their outcome
+
+| WORKSTREAM | OWNER | STATUS | EVIDENCE | REMAINING RISK |
+|---|---|---|---|---|
+| Clean build + boot (AWG-014 proof) | delegated worker, re-verified by maintainer | **PASS** | `8.0` `sys`/`src` verified, unpacked; `config AWG.MP` + `make -j2` as `awgbuild`; artifact `7f454c46`, 33 518 410 B, sha256 `c970ab83…`, 138 `awg*` symbols; installed and booted as `AWG.MP#0` then `#11` | builder still compiles what root installs |
+| Repository gates on a freshly built kernel | delegated worker | **PASS** | `check-vm`: smoke, wire, matrix, stress — 4/4 gates, `RESULT: all cases passed` | not a lifetime/lock proof |
+| Installer: build/install separation | delegated worker + maintainer fixes | **PASS** | `tree_trust` (symlinks resolved), `resolve_build_user`, `builder_make`; group-writable tree refused with path/owner/mode | third-party-trusted builder |
+| Installer: paired backup/rollback | delegated worker + maintainer fixes | **PASS** | six rehearsal scenarios (a–f) on a disposable guest; `--check` reports pair, trust, build user | KARL relink handled by design, not by test-only hack |
+| Full `install.sh --all` end to end | maintainer | **PASS** | real run on 8.0: unprivileged kernel build, pair backup + manifest (`release_tag=rc-e2e`), install, reboot → `AWG.MP#12`, `awg0 create` + `awgversion 3.1` work, `--check` → `result: ready` | one release/one arch only |
+| Official client interop | maintainer (worker ran out of budget) | **PASS, narrow** | `amneziawg-go` @ `b5928ef` ↔ kernel: legacy and 3.1 (S3/S4+HPK), ICMP both ways, 8 MiB each direction with matching sha256 | no Android/Windows/Linux-module run |
+| ABI probe | delegated worker | **partly** | ioctl size-probe down to 1 byte, zeroed struct, `SIZE_MAX` — `EINVAL`/no panic | no old/new binary matrix |
+| New defect found | delegated worker, verified by maintainer | **open, low** | AWG-037: `addr_bytes` is `uint8_t`, not `uint8_t[16]` | ABI change needs a paired rebuild |
+
+Two claims from the delegated worker did **not** survive checking and are not
+repeated here: the `awgpeer` pool "leak" (10 create/destroy cycles leave the count
+unchanged, and the 6 items it saw were live interfaces) and the "HAS_3_1 bit range
+collision" (`AWG_INTERFACE_HAS_I1` is bit 20 and the group runs to bit 24, so the
+mask is consistent).
+
+### 11.3 Interoperability matrix (actual, not inferred)
+
+| Pair | Legacy | 3.1 (S3/S4+HPK) | Notes |
+|---|---|---|---|
+| OpenBSD ↔ OpenBSD (two guests) | PASS | PASS | handshake, ICMP, 8 MiB with sha256 |
+| OpenBSD ↔ official `amneziawg-go` | PASS | PASS | both initiators exercised by keepalive placement; 8 MiB each direction, hashes matched |
+| OpenBSD ↔ official Linux module | NOT RUN | NOT RUN | no Linux module guest built |
+| OpenBSD ↔ Android / Windows | NOT RUN | NOT RUN | no client available in this pass |
+
+I1–I5 signatures, content-padding addition, random trailers and disable-cookies
+were configured in neither direction, so they carry no interop claim.
+
+### 11.4 Revised gate table
+
+| Gate | Status |
+|---|---|
+| Repository baseline recorded | PASS |
+| P0 findings remediated and validated | PASS |
+| AWG-014 / AWG-029 | PASS (fixed, rehearsed) |
+| Clean build from verified sources | PASS (unprivileged, booted) |
+| Kernel boots, interface create/configure/teardown | PASS (`check-vm` on the new kernel) |
+| Legacy + 3.1 interop on claimed endpoints | PASS for OpenBSD and official Go; other clients NOT RUN |
+| Malformed-input and reconfiguration regressions | PASS (repository wire/matrix/stress suites) |
+| No new panic, leak or crypto regression | PASS in the runs above |
+| Upgrade/rollback runbook exercised | PASS at file level (six scenarios); rescue mode NOT RUN |
+| Docs match tested code | PASS after this pass |
+| Patch/source integrity/manifest current | PASS (`make check`, generated patch current) |
+| Independent review recorded | PASS (official API review, adjudicated; its nonce/ChaCha/path claims were refuted with source and a keystream KAT) |
+| Constrained 1-vCPU performance | NOT RUN |
+| Long soak, bounded fuzz corpus | NOT RUN (a 2000-datagram flood script is staged, not executed) |
+
+### 11.5 Verdict
+
+**READY FOR A RELEASE CANDIDATE**, conditioned on the release notes carrying
+§11.3 and §11.4 verbatim: OpenBSD 8.0 amd64, OpenBSD↔OpenBSD and
+OpenBSD↔`amneziawg-go`, legacy and 3.1 obfuscation, paired rollback rehearsed.
+Everything outside that list is unverified and must not be advertised. No agent
+in this pass rebooted, reconfigured or deployed anything outside the disposable
+guests.

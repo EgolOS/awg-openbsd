@@ -1,0 +1,24 @@
+==> Building as awgbuild
+
+──── Pre-flight check ────
+os            : OpenBSD 8.0 (amd64)
+signify key   : /etc/signify/openbsd-80-base.pub
+kernel source : /usr/src/sys
+ifconfig src  : recorded 8.0 baseline
+running kernel: AWG.MP#12
+manifest      : /var/db/awg-install/manifest (release_tag rc-e2e, kernel AWG.MP#11)
+kernel sha256 : matches /var/db/kernel.SHA256
+relink        : /bsd differs from the staged kernel (KARL relink, expected after boot)
+ifconfig sha  : matches manifest
+ifconfig awg  : awgversion supported
+rollback      : pair present (/bsd.awg-prev + /sbin/ifconfig.awg-prev)
+build user    : awgbuild
+src trust     : trusted (/usr/src/sys)
+ifconfig trust: trusted (/usr/src/sbin/ifconfig)
+disk free     : 733M
+
+plan: fetch+verify sources as root, hand the verified tree to the build user,
+      config AWG.MP + make as that user, verify the artifact, stage it,
+      back up /bsd + /sbin/ifconfig as a pair, install, reboot.
+
+result: ready

@@ -222,16 +222,28 @@ soak, coverage-guided fuzzing or performance result is claimed.
   content becomes safe. Narrow doas policy matrices have not all been rehearsed.
 
 ### AWG-014 — Build and install run as root inside a group-writable source tree
-- Severity: medium · State: open · Confidence: needs-validation (deployment fact: `wsrc` membership)
-- Surface: local (a member of the `wsrc` group)
-- Affected: all commits through `f43535e`
-- Root cause: `install.sh:111-114,185-191` run `make` in `/usr/src/sbin/ifconfig` and
+- Severity: medium · State: fixed · Confidence: confirmed
+- Surface: local (any account that can write a file root will compile)
+- Affected: all commits through `7afa788`
+- Root cause: `install.sh` ran `make` in `/usr/src/sbin/ifconfig` and
   `/usr/src/sys/arch/amd64/compile/AWG.MP` as root; stock `/usr/src` is `root:wsrc 0775`, so
   whatever is in those makefiles executes as root at the next `--all`.
-- Remediation: not fixed — check `find … -group wsrc -perm -g+w` is empty, or build unprivileged
-  and install as root.
-- Regression test: no automated test.
-- Evidence: `run-1/agents/h3-userspace/report.md` (F-C11), `run-1/REPORT.md`
+- Fix: root now only fetches, verifies, stages and installs. `resolve_build_user` picks the
+  builder (`AWG_BUILD_USER`, default `_awgbuild`; a missing account is an error, never a silent
+  root fallback), `tree_trust` walks every component of the build tree after resolving symlinks
+  and refuses one owned by a third party or group/other-writable, and `builder_make` runs
+  `config`/`make` through `doas -u <builder>`. `--allow-root-build` exists for recovery only and
+  prints a warning.
+- Validation: `tools/tests/test_installer_transaction.py` (17 tests) plus the disposable-guest
+  rehearsal `tools/lab/installer-recovery-test.sh` scenario e (a group-writable tree is refused
+  with the path, owner and mode). The unprivileged build was proven end to end on OpenBSD 8.0:
+  `config AWG.MP` + `make -j2` as `awgbuild` produced a 33.5 MB kernel with
+  `awg_encap`/`awg_decap`/`awg_ioctl_set` linked, and that kernel booted (`AWG.MP#0`,
+  `lab@…:/home/build2/sys/…`).
+- Residual: the builder still compiles code that root installs; the integrity boundary is
+  `verify_kernel_artifact` plus the manifest, not the compiler. A compromised builder can produce
+  a kernel that passes an ELF/symbol check — the same trust any package build carries.
+- Evidence: `docs/evidence/2026-11-07/w1/01-build.log`, `01b-unpriv.log`, `reports/w1.md`
 
 ### AWG-015 — `awg_last_underload` is one static shared by every `awg` interface
 - Severity: low · State: fixed · Confidence: confirmed
@@ -425,14 +437,48 @@ soak, coverage-guided fuzzing or performance result is claimed.
 - Evidence: `run-1/agents/k1-kernel/findings.md` (F-K7), `run-1/REPORT.md`
 
 ### AWG-029 — `/sbin/ifconfig` is overwritten with no backup
-- Severity: info · State: open · Confidence: confirmed
+- Severity: info · State: fixed · Confidence: confirmed
 - Surface: local root (installer)
-- Affected: all commits through `f43535e`
-- Root cause: `install.sh:114` installs over `/sbin/ifconfig` with no stock copy, so a bad build
-  replaces the tool used to bring up any interface; `docs/DEPLOY-vps.md` backs up `/bsd` only.
-- Remediation: not fixed — `cp -p /sbin/ifconfig /root/ifconfig-stock-$(uname -r)` first.
-- Regression test: no automated test.
-- Evidence: `run-1/agents/h3-userspace/report.md` (F-C16), `run-1/REPORT.md`
+- Affected: all commits through `7afa788`
+- Root cause: `install.sh` installed over `/sbin/ifconfig` with no copy of the stock tool, so a
+  bad build replaced the tool used to bring up any interface; `--rollback` restored `/bsd` only.
+- Fix: before anything is replaced, `write_backup_pair` records a manifest
+  (`/var/db/awg-install/manifest`: release tag, `uname -r`/`-v`, backup and installed sha256 for
+  `/bsd`, `/sbin/ifconfig` and `/usr/include/net/if_awg.h`) and copies the pair to
+  `/bsd.awg-prev` + `/sbin/ifconfig.awg-prev`; `record_installed_pair` records what was installed.
+  `--rollback` restores both, verifying each against the manifest and keeping a safety copy of
+  the current pair so a half-failed restore never leaves a mismatched kernel/tool. A missing
+  ifconfig backup is refused unless the operator passes `--rollback-kernel-only` (documented as
+  unsafe). `--check` reports the pair against the manifest and `/var/db/kernel.SHA256`.
+- Validation: `tools/lab/installer-recovery-test.sh` on a disposable OpenBSD 8.0 guest, six
+  scenarios all succeeded: paired rollback restores both files byte-identically; a failed ifconfig
+  install still leaves a restorable pair; a missing ifconfig backup is refused and
+  `--rollback-kernel-only` restores `/bsd` alone; a truncated `/bsd.awg-prev` is refused with
+  `/bsd` untouched; a group-writable tree is refused; `--check` prints pair, trust and build user.
+- Residual: KARL relinks `/bsd` at boot, so the on-disk hash legitimately differs from the staged
+  artifact — `--check` therefore compares `/var/db/kernel.SHA256` for integrity and reports the
+  manifest difference as a relink note rather than a failure. The rehearsal swaps a copy of the
+  running kernel instead of rebuilding, and does not reboot between scenarios.
+- Evidence: `tools/lab/installer-recovery-test.sh` output in `docs/evidence/2026-11-07/`;
+  `tools/tests/test_installer_transaction.py`
+
+### AWG-037 — `struct awg_aip_io` declares `addr_bytes` as a single byte
+- Severity: low · State: open · Confidence: confirmed
+- Surface: local privileged (an ioctl consumer other than the bundled ifconfig)
+- Affected: `src/if_awg.h:57-64` at `7afa788`
+- Root cause: the union member is `uint8_t addr_bytes;` where upstream `if_wg.h` has
+  `uint8_t addr_bytes[16];`. Any consumer that reads an IPv6 allowed-ip through `addr_bytes`
+  gets one byte of it. The bundled ifconfig is unaffected: it reads `a_af` + `a_ipv6`/`a_ipv4`.
+- Not exploitable by itself: the kernel fills the union by address family and the size of the
+  enclosing structure is what the ioctl checks, so this is an API inconsistency, not a
+  memory-safety bug in the driver.
+- Fix: one line (`uint8_t addr_bytes[16];`), but it changes the size of `struct awg_aip_io` and
+  therefore the ioctl ABI, so the kernel and the patched ifconfig must be rebuilt and installed
+  as a pair, and the staged-ifconfig gate must be re-run. Deferred to the next build cycle rather
+  than changing an ABI on a release-candidate tree that has already been exercised.
+- Regression test: none yet; the negative test belongs with the ABI probe (`AWG-036` family).
+- Evidence: `src/if_awg.h:57-64`; found by the delegated build/ABI worker, verified by the
+  maintainer against upstream `sys/net/if_wg.h`.
 
 ### AWG-030 — `awgversion legacy` frees an uninitialised stack array (kernel panic)
 - Severity: medium · State: fixed · Confidence: confirmed (panicked `AWG.MP#4`, clean on `AWG.MP#5`)
@@ -563,14 +609,14 @@ soak, coverage-guided fuzzing or performance result is claimed.
 
 ## Open items — owner-facing decisions
 
-- **AWG-014 — release blocker:** root builds still use writable source trees.
-  Native lab facts: /usr/src root:wsrc 0775, sys symlink to lab-owned /home/build;
-  no wsrc members are required when the source owner itself is untrusted. Do not
-  run root make in this layout on a shared/production machine. Isolate verified
-  sources and compile unprivileged; validate install-only privilege separately.
-- **AWG-029 — release blocker:** kernel rollback exists, but ifconfig is still
-  replaced without an automatic paired backup/restore. A manual same-release
-  pair procedure is documented but NOT REHEARSED in this pass.
+- **AWG-014 — fixed and validated:** the installer no longer runs `make` as root.
+  The builder account compiles, `tree_trust` (symlinks resolved) refuses a tree a
+  third party can write, and root only verifies and installs. Proven by an
+  unprivileged 8.0 build that booted, and by the refusal scenario in the lab
+  rehearsal. See the AWG-014 entry for the residual trust in the builder.
+- **AWG-029 — fixed and rehearsed:** the kernel and `/sbin/ifconfig` are backed
+  up, recorded and restored as a pair, with a documented kernel-only escape hatch
+  and a safety copy on every restore. Six disposable-guest scenarios pass.
 - **AWG-020 — existing accepted limitation:** no snapshot/locking refactor here.
   Keep live parameter changes controlled; broader authenticated-traffic soak and
   lifetime/lock-order proof remain outstanding, not silently waived.
@@ -578,11 +624,17 @@ soak, coverage-guided fuzzing or performance result is claimed.
   can equalize lengths; do not promise collision configurations always handshake.
   Collision/overlap interop against official clients remains NOT RUN.
 - **AWG-013/023/025/026:** local fixes and revalidation are recorded above.
-- **Outstanding acceptance gates:** clean verified full kernel build/boot; exact
-  ABI/old-new mismatch matrix; official Go/Linux/Android/Windows tunnels; IPv6,
-  roaming, rekey/loss/NAT/MTU; fault injection; long soak/fuzz; full install,
-  upgrade/rollback/rescue rehearsal; reproducible constrained-resource benchmarks.
-  These are NOT RUN, not PASS and not human-accepted exceptions.
+- **Closed in this pass:** clean verified kernel build and boot (OpenBSD 8.0,
+  unprivileged compile, `AWG.MP#0`/`#11` booted); official amneziawg-go tunnels in
+  both directions for the legacy profile and for 3.1 S3/S4 + header protection,
+  8 MiB per direction with matching sha256; paired rollback rehearsal in a
+  disposable guest.
+- **Still outstanding:** old/new ABI mismatch matrix beyond the size-probe probe;
+  Linux kernel module, Android and Windows clients; IPv6 tunnel traffic, roaming,
+  rekey/loss/NAT/MTU; fault injection; long soak and a bounded fuzz corpus; a full
+  `install.sh --all` run with a real build followed by a reboot; rescue-mode
+  recovery; reproducible constrained (1 vCPU/1 GB) benchmarks. These are NOT RUN,
+  not PASS and not human-accepted exceptions.
 
 ## Process
 

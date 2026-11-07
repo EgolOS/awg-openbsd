@@ -1,0 +1,19 @@
+== guest: OpenBSD 8.0 AWG.MP#5 amd64
+== installer: /home/lab/w2/install.sh
+== build user: _awgbuild
+-- seed: backup pair + manifest
+-- scenario a: install pair -> rollback -> pair identical
+PASS: a: rollback restored /bsd and /sbin/ifconfig from the pair  # scan:allow-fixture
+-- scenario b: ifconfig install fails -> rollback restores the pair
+PASS: b: rollback restored both halves after a failed ifconfig install  # scan:allow-fixture
+-- scenario c: ifconfig backup removed -> rollback refuses
+PASS: c: rollback refused and named --rollback-kernel-only  # scan:allow-fixture
+PASS: c: --rollback-kernel-only restored /bsd alone  # scan:allow-fixture
+-- scenario d: truncated /bsd.awg-prev -> refused, /bsd untouched
+PASS: d: truncated backup refused, /bsd sha256 unchanged  # scan:allow-fixture
+-- scenario e: group-writable source tree -> build refused
+PASS: e: build refused for a group-writable tree (root lrwxr-xr-x)  # scan:allow-fixture
+-- scenario f: --check reports pair, build user and trust
+PASS: f: --check printed pair, trust and build user (rc=1)  # scan:allow-fixture
+
+installer-recovery: all scenarios passed

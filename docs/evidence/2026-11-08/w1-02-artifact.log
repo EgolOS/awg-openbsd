@@ -1,0 +1,7 @@
+EXISTS
+magic=7f454c46
+size=33518410
+SHA256 (/home/build2/sys/arch/amd64/compile/AWG.MP/obj/bsd) = c970ab834885c2388ecd4120a1990945697312cedf3eb3fb3951d89de5dd2363
+ffffffff81e79330 T awg_encap
+ffffffff81e79990 T awg_decap
+ffffffff81e7bb90 T awg_ioctl_set

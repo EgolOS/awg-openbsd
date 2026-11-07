@@ -1,0 +1,3 @@
+INSTALL_MATCH
+kern.version=OpenBSD 8.0 (AWG.MP) #5: Sat Nov  7 17:09:34 UTC 2026
+    lab@obsd-a.my.domain:/home/build/sys/arch/amd64/compile/AWG.MP

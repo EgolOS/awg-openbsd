@@ -1,0 +1,60 @@
+cd /home/build2/sys/arch/amd64/compile/AWG.MP/obj && config -s /home/build2/sys -b /home/build2/sys/arch/amd64/compile/AWG.MP/obj /home/build2/sys/arch/amd64/conf/AWG.MP
+cp /home/build2/sys/conf/makegap.sh makegap.sh
+echo '__asm(".section .rodata,\"a\"");' > gapdummy.c
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -c -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-vari
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+...
+[trimmed: the complete log is on the disposable lab guest]
+...
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+rm -f param.c
+cp /home/build2/sys/conf/param.c .
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cat /home/build2/sys/arch/amd64/amd64/genassym.cf /home/build2/sys/arch/amd64/amd64/genassym.cf |  sh /home/build2/sys/kern/genassym.sh cc -no-integrated-as -g -Werror -Wall -Wimpl
+sed '1s/.*/assym.h: \\/' assym.P > assym.d
+sort -u assym.h.tmp > assym.h
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -D_LOCORE -x assembler-with-cpp -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+cp /home/build2/sys/arch/amd64/conf/ld.script ld.script
+sh /home/build2/sys/conf/newvers.sh
+cc -g -Werror -Wall -Wimplicit-function-declaration  -Wno-pointer-sign  -Wframe-larger-than=2047 -Wno-address-of-packed-member -Wno-constant-conversion  -Wno-unused-but-set-variabl
+LD="ld" sh makegap.sh 0xcccccccc gapdummy.o
+ld -T ld.script -X --warn-common -nopie --no-mmap-output-file -o bsd ${SYSTEM_HEAD} vers.o ${OBJS}
+text	data	bss	dec	hex
+28039450	498617	1396736	29934803	1c8c4d3
+mv bsd bsd.gdb
+ctfstrip -S -o bsd bsd.gdb
+build_exit=0
+2026-11-08T00:46:07+03:00

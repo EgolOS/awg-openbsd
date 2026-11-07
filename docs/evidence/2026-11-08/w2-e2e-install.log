@@ -1,0 +1,25 @@
+==> Configuring AWG.MP
+cd /home/build/sys/arch/amd64/compile/AWG.MP/obj && config -s /home/build/sys -b /home/build/sys/arch/amd64/compile/AWG.MP/obj /home/build/sys/arch/amd64/conf/AWG.MP
+==> Building kernel — this takes ~15 minutes (log: /tmp/awg-install-log.7cjcdr)
+==> Verified /usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd (33549002 bytes, awg symbols present)
+==> Staging kernel to /bsd.awg-staging
+==> Recorded the installed pair in /var/db/awg-install/manifest
+==> Kernel installed to /bsd — reboot to activate
+==> If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh /home/lab/w3/install.sh --rollback
+
+==========================================
+ AmneziaWG install complete
+==========================================
+
+REBOOT REQUIRED to load the AWG kernel.
+
+After reboot:
+  uname -v                   # verify AWG.MP kernel
+  ifconfig awg0 create       # verify awg device
+
+Place your config:
+  /etc/amnezia/amneziawg/<name>.conf
+
+Then: awg-quick up <name>
+
+Log: /tmp/awg-install-log.7cjcdr

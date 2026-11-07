@@ -73,7 +73,11 @@ resolve_build_user() {
 # path component that root must not trust. A component is trusted when it is
 # owned by the builder, or owned by root and not group/other writable (AWG-014).
 tree_trust() {
-    local p=$1 owner mode perm gw ow
+    local p owner mode perm gw ow
+    # Resolve symlinks first: a link owned by root points at a target that is
+    # what the build actually reads and writes (/usr/src/sys -> /home/build/sys
+    # is the usual lab setup), so the link's own ownership proves nothing.
+    p=$(readlink -f "$1")
     [ -e "$p" ] || { echo "untrusted: $p does not exist"; return 0; }
     while :; do
         owner=$(stat -f '%Su' "$p" 2>/dev/null) || { echo "untrusted: $p cannot be stat'ed"; return 0; }
@@ -269,9 +273,14 @@ install_ifconfig() {
     hand_tree_to_builder "$IFCFG_SRC"
     log "Building ifconfig"
     builder_make "$IFCFG_SRC" || die "ifconfig build failed"
-    # The binary is in obj/ if that exists
-    install -c -s -o root -g bin -m 555 "$(make -V .OBJDIR)/ifconfig" /sbin/ifconfig
-    install -c -o root -g bin -m 444 ifconfig.8 /usr/share/man/man8/ifconfig.8
+    # The binary lands in the object directory `make` chose for that tree, which
+    # is not the caller's cwd now that the build runs in a subshell. Ask make
+    # from inside the source directory instead of assuming ./obj.
+    local objdir
+    objdir=$(cd "$IFCFG_SRC" && make -V .OBJDIR) || die "cannot resolve the ifconfig object directory"
+    [ -x "$objdir/ifconfig" ] || die "ifconfig build produced no binary in $objdir"
+    install -c -s -o root -g bin -m 555 "$objdir/ifconfig" /sbin/ifconfig
+    install -c -o root -g bin -m 444 "$IFCFG_SRC/ifconfig.8" /usr/share/man/man8/ifconfig.8
     log "ifconfig installed to /sbin/ifconfig"
 }
 
@@ -417,6 +426,7 @@ install_kernel() {
     cmp -s "$bsd" /bsd || die "/bsd does not match the built kernel after install"
     sha256 -h /var/db/kernel.SHA256 /bsd 2>/dev/null \
         || log "warning: could not update /var/db/kernel.SHA256 (syspatch will ask to rebuild it)"
+    record_installed_pair "$bsd"
 
     log "Kernel installed to /bsd — reboot to activate"
     log "If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh $0 --rollback"
@@ -461,9 +471,9 @@ write_backup_pair() {
         printf 'uname_r=%s\n' "$(uname -r)"
         printf 'uname_v=%s\n' "$(uname -v)"
         printf 'release_tag=%s\n' "$(release_tag)"
-        printf 'bsd_sha256=%s\n' "$bsd_sha"
-        printf 'ifconfig_sha256=%s\n' "$ifc_sha"
-        printf 'if_awg_h_sha256=%s\n' "$hdr_sha"
+        printf 'backup_bsd_sha256=%s\n' "$bsd_sha"
+        printf 'backup_ifconfig_sha256=%s\n' "$ifc_sha"
+        printf 'backup_if_awg_h_sha256=%s\n' "$hdr_sha"
     } > "$MANIFEST" || die "cannot write $MANIFEST"
     chmod 600 "$MANIFEST" || die "cannot set mode on $MANIFEST"
 
@@ -498,13 +508,28 @@ restore_pair_member() {
 
 # Restore the pair. With --rollback-kernel-only only /bsd is restored, which is
 # documented as unsafe because the management tool may not match the kernel.
+# Record what was actually installed, next to the backup pair. KARL relinks
+# /bsd at boot, so this hash is the *staged* artifact, not what /bsd will hold
+# after the reboot: --check compares /var/db/kernel.SHA256 for integrity and
+# only reports the difference here as a relink note (AWG-029).
+record_installed_pair() {		# record_installed_pair <staged-kernel>
+    local staged=$1
+    [ -f "$MANIFEST" ] || return 0
+    {
+        printf 'installed_bsd_sha256=%s\n' "$(sha256 -q "$staged" 2>/dev/null || echo unknown)"
+        printf 'installed_ifconfig_sha256=%s\n' "$(sha256 -q "$IFCFG_FILE" 2>/dev/null || echo unknown)"
+        printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >> "$MANIFEST" || { log "warning: could not record the installed pair in $MANIFEST"; return 0; }
+    log "Recorded the installed pair in $MANIFEST"
+}
+
 rollback_pair() {
     local stamp safety_bsd safety_ifc bsd_sha ifc_sha
 
     step "Rollback to the previous kernel/ifconfig pair"
     [ -f "$MANIFEST" ] || die "no backup manifest at $MANIFEST — nothing to roll back"
-    bsd_sha=$(manifest_get "$MANIFEST" bsd_sha256)
-    ifc_sha=$(manifest_get "$MANIFEST" ifconfig_sha256)
+    bsd_sha=$(manifest_get "$MANIFEST" backup_bsd_sha256)
+    ifc_sha=$(manifest_get "$MANIFEST" backup_ifconfig_sha256)
     [ -n "$bsd_sha" ] || die "manifest $MANIFEST records no bsd_sha256"
 
     if [ "$ROLLBACK_KERNEL_ONLY" != yes ]; then
@@ -589,15 +614,28 @@ check_plan() {
     if [ -f "$MANIFEST" ]; then
         m_tag=$(manifest_get "$MANIFEST" release_tag)
         m_v=$(manifest_get "$MANIFEST" uname_v)
-        m_bsd=$(manifest_get "$MANIFEST" bsd_sha256)
-        m_ifc=$(manifest_get "$MANIFEST" ifconfig_sha256)
+        m_bsd=$(manifest_get "$MANIFEST" installed_bsd_sha256)
+        m_ifc=$(manifest_get "$MANIFEST" installed_ifconfig_sha256)
         printf 'manifest      : %s (release_tag %s, kernel %s)\n' "$MANIFEST" "$m_tag" "$m_v"
         bsd_sha=$(sha256 -q "$BSD_FILE" 2>/dev/null || true)
-        if [ -n "$m_bsd" ] && [ "$bsd_sha" = "$m_bsd" ]; then
+        # KARL relinks /bsd at boot, so the hash of a correctly installed kernel
+        # changes legitimately. Integrity is /var/db/kernel.SHA256's job; the
+        # manifest hash is only meaningful before the first reboot.
+        if [ -f /var/db/kernel.SHA256 ]; then
+            want_k=$(awk '/^SHA256 \(\/bsd\)/ { print $NF }' /var/db/kernel.SHA256 2>/dev/null)
+            if [ -n "$want_k" ] && [ "$bsd_sha" = "$want_k" ]; then
+                printf 'kernel sha256 : matches /var/db/kernel.SHA256\n'
+            else
+                printf 'kernel sha256 : MISMATCH against /var/db/kernel.SHA256 (%s)\n' "${want_k:-unreadable}"
+                rc=1
+            fi
+        elif [ -n "$m_bsd" ] && [ "$bsd_sha" = "$m_bsd" ]; then
             printf 'kernel sha256 : matches manifest\n'
         else
-            printf 'kernel sha256 : MISMATCH (%s vs manifest %s)\n' "${bsd_sha:-unreadable}" "$m_bsd"
-            rc=1
+            printf 'kernel sha256 : not recorded by this installer (no /var/db/kernel.SHA256)\n'
+        fi
+        if [ -n "$m_bsd" ] && [ -n "$bsd_sha" ] && [ "$bsd_sha" != "$m_bsd" ]; then
+            printf 'relink        : /bsd differs from the staged kernel (KARL relink, expected after boot)\n'
         fi
         ifc_sha=$(sha256 -q "$IFCFG_FILE" 2>/dev/null || true)
         if [ -n "$m_ifc" ] && [ "$ifc_sha" = "$m_ifc" ]; then

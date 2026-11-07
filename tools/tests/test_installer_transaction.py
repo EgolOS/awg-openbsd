@@ -227,9 +227,12 @@ class InstallerTransaction(unittest.TestCase):
                             'uname_r=8.0\n'
                             'uname_v=OpenBSD 8.0 (AWG.MP) #5\n'
                             'release_tag=0.2.0\n'
-                            'bsd_sha256=' + hashlib.sha256(b'kernel-bytes\n').hexdigest() + '\n'
-                            'ifconfig_sha256=' + hashlib.sha256(b'ifconfig-bytes\n').hexdigest() + '\n'
-                            'if_awg_h_sha256=\n')
+                            'backup_bsd_sha256=' + hashlib.sha256(b'kernel-bytes\n').hexdigest() + '\n'
+                            'backup_ifconfig_sha256=' + hashlib.sha256(b'ifconfig-bytes\n').hexdigest() + '\n'
+                            'backup_if_awg_h_sha256=\n'
+                            'installed_bsd_sha256=' + hashlib.sha256(b'kernel-bytes\n').hexdigest() + '\n'
+                            'installed_ifconfig_sha256=' + hashlib.sha256(b'ifconfig-bytes\n').hexdigest() + '\n'
+                            'installed_at=2026-11-08T00:00:00Z\n')
         return manifest
 
     ROLLBACK_BODY = (extract('manifest_get') + '\n' + extract('restore_pair_member')

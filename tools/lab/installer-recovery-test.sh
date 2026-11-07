@@ -13,9 +13,9 @@ set -u
 	echo 'FAIL: set AWG_LAB_DISPOSABLE=1 only for disposable lab VMs' >&2; exit 1;
 }
 
-FAILED=0
+FAILS=0
 pass() { echo "PASS: $*"; }
-fail() { echo "FAIL: $*"; FAILED=$((FAILED + 1)); }
+fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 
 BSD=/bsd
 IFC=/sbin/ifconfig
@@ -74,9 +74,12 @@ seed_pair() {
 		printf 'uname_r=%s\n' "$(uname -r)"
 		printf 'uname_v=%s\n' "$(uname -v)"
 		printf 'release_tag=%s\n' "${AWG_RELEASE_TAG:-lab-seed}"
-		printf 'bsd_sha256=%s\n' "$(sha256 -q "$BSD")"
-		printf 'ifconfig_sha256=%s\n' "$(sha256 -q "$IFC")"
-		printf 'if_awg_h_sha256=%s\n' "$([ -f /usr/include/net/if_awg.h ] && sha256 -q /usr/include/net/if_awg.h)"
+		printf 'backup_bsd_sha256=%s\n' "$(sha256 -q "$BSD")"
+		printf 'backup_ifconfig_sha256=%s\n' "$(sha256 -q "$IFC")"
+		printf 'backup_if_awg_h_sha256=%s\n' "$([ -f /usr/include/net/if_awg.h ] && sha256 -q /usr/include/net/if_awg.h)"
+		printf 'installed_bsd_sha256=%s\n' "$(sha256 -q "$BSD")"
+		printf 'installed_ifconfig_sha256=%s\n' "$(sha256 -q "$IFC")"
+		printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} > "$MANIFEST"
 	chmod 600 "$MANIFEST"
 	cp -p "$BSD" "$BSD_BAK"
@@ -188,5 +191,5 @@ fi
 
 rm -f "$NEW" "$STUB_INSTALL" /tmp/awga* /tmp/awgb* /tmp/awgc* /tmp/awgd* /tmp/awge* /tmp/awgf*
 echo ""
-if [ "$FAILED" -eq 0 ]; then echo "PASS: installer-recovery all scenarios"; exit 0; fi
-echo "FAIL: installer-recovery $FAILED scenario(s) failed"; exit 1
+if [ "$FAILS" -eq 0 ]; then echo "installer-recovery: all scenarios passed"; exit 0; fi
+echo "installer-recovery: $FAILS scenario(s) failed"; exit 1

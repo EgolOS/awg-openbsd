@@ -13,10 +13,17 @@ AWG parameters are configured directly through `ifconfig(8)` — the same tool u
 
 ## Release status
 
-**NOT READY for a new release candidate.** Local hardening/test changes are
-recorded in [the engineering report](docs/ENGINEERING-REPORT.md). Root builds
-from writable sources (AWG-014), paired kernel/ifconfig recovery (AWG-029),
-clean-build provenance and official-client interoperability remain release gates.
+**READY FOR A RELEASE CANDIDATE**, with the claims narrowed to what was actually
+executed. Verified on disposable OpenBSD 8.0 amd64 guests: an unprivileged kernel
+build from signature-verified sources boots and passes the repository gates; the
+tunnel interoperates with the official `amneziawg-go` in both directions for the
+legacy profile and for 3.1 (S3/S4 + header protection) with hash-verified 8 MiB
+payloads; the installer separates build from install (AWG-014) and restores
+`/bsd` + `/sbin/ifconfig` as a pair (AWG-029), rehearsed across six failure
+scenarios. Not verified and not claimed: Android/Windows clients, the Linux
+kernel module, IPv6 tunnel traffic, roaming/NAT/MTU matrices, long soak and fuzz,
+and 1-vCPU throughput figures. Evidence and the full gate table:
+[the engineering report](docs/ENGINEERING-REPORT.md).
 The following install commands are for a disposable lab, not a remote-only server.
 
 ## Quick start

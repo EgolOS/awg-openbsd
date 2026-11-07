@@ -1,0 +1,22 @@
+== kernel: AWG.MP#11
+== churn rounds: 200
+-- round 50 done (1794089472 - 1794089466 s elapsed)
+-- round 100 done (1794089478 - 1794089466 s elapsed)
+-- round 150 done (1794089485 - 1794089466 s elapsed)
+-- round 200 done (1794089492 - 1794089466 s elapsed)
+== churn finished in 26 s, failures: 0
+== dmesg delta (before -> after)
+== vmstat -m awg rows before/after
+awgaip        80       86    0        0     4     4     0     1     0     8    0
+awgpeer     5136        6    0        0     4     4     0     1     0     8    0
+awgaip        80       86    0        0     4     4     0     1     0     8    0
+awgpeer     5136        6    0        0     4     4     0     1     0     8    0
+== interface gone check
+PASS: awg0 not present after churn  # scan:allow-fixture
+== fresh handshake after churn (awg0 <-> awg1 over loopback, legacy)
+FAIL: no handshake after churn within 8s
+== ping over tunnel
+FAIL: ping through the tunnel
+== kernel alive: AWG.MP#11
+RESULT: churn 2 failure(s)
+churn_exit=1

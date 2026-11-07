@@ -1,0 +1,144 @@
+== smoke-test
+== kernel: AWG.MP#12
+PASS: custom AWG kernel is running  # scan:allow-fixture
+
+== 1. device lifecycle and key handling
+PASS: awg0 create  # scan:allow-fixture
+PASS: awg1 create  # scan:allow-fixture
+PASS: awg0 key from stdin (awgkey -)  # scan:allow-fixture
+PASS: awg1 key as an argument (awgkey <b64>)  # scan:allow-fixture
+PASS: short key rejected  # scan:allow-fixture
+PASS: keypairs derived from the configured keys  # scan:allow-fixture
+
+== 2. configuration bounds (legacy): EINVAL, device unaffected
+PASS: awgs1 65535 rejected  # scan:allow-fixture
+PASS: awgs1 1281 rejected (AWG_MAX_PADDING)  # scan:allow-fixture
+PASS: awgs2 65535 rejected  # scan:allow-fixture
+PASS: awgs2 1281 rejected (AWG_MAX_PADDING)  # scan:allow-fixture
+PASS: awgjc 65535 rejected  # scan:allow-fixture
+PASS: awgjc 65 rejected (AWG_MAX_JUNK)  # scan:allow-fixture
+PASS: awgjmax 1501 rejected  # scan:allow-fixture
+PASS: 3.1-only parameter rejected on a legacy interface  # scan:allow-fixture
+PASS: I1 rejected on a legacy interface  # scan:allow-fixture
+PASS: device still usable after rejected values  # scan:allow-fixture
+
+== 3. legacy handshake: two interfaces on this host, endpoint 127.0.0.1
+PASS: awg0 port  # scan:allow-fixture
+PASS: awg1 port  # scan:allow-fixture
+PASS: awg0 obfuscation parameters  # scan:allow-fixture
+PASS: awg1 obfuscation parameters  # scan:allow-fixture
+PASS: awg0 peer  # scan:allow-fixture
+PASS: awg1 peer  # scan:allow-fixture
+PASS: awg0 address  # scan:allow-fixture
+PASS: awg1 address  # scan:allow-fixture
+PASS: handshake completed over the obfuscated UDP path  # scan:allow-fixture
+PASS: last handshake: 0 seconds ago  # scan:allow-fixture
+PASS: awg0 tx counter moved (412)  # scan:allow-fixture
+PASS: awg0 rx counter moved (124)  # scan:allow-fixture
+
+== 4. malformed input from the wire (must not panic)
+PASS: sent truncated and oversized datagrams, kernel alive: AWG.MP#12  # scan:allow-fixture
+PASS: device still usable after malformed input  # scan:allow-fixture
+
+== 5. 3.1 interface: header protection, S3/S4, I1, ranges
+PASS: awg1 version 3.1  # scan:allow-fixture
+PASS: awg1 S1-S4 + header protection key  # scan:allow-fixture
+PASS: awg1 I1 spec  # scan:allow-fixture
+PASS: awg1 timing ranges  # scan:allow-fixture
+PASS: awg1 parameters round-trip  # scan:allow-fixture
+PASS: reject-after <= keepalive + rekey rejected  # scan:allow-fixture
+PASS: I1 above the UDP payload bound rejected  # scan:allow-fixture
+PASS: I1 at the UDP payload bound accepted (skipped at send time)  # scan:allow-fixture
+
+== 6. teardown
+PASS: awg0 destroy  # scan:allow-fixture
+PASS: awg1 destroy  # scan:allow-fixture
+
+RESULT: all cases passed
+== wire-test
+== empty and very short datagrams
+PASS: zero-length (interface still usable)  # scan:allow-fixture
+PASS: one byte (interface still usable)  # scan:allow-fixture
+PASS: half a header (interface still usable)  # scan:allow-fixture
+== unstructured noise
+PASS: 148 bytes of noise (one packet size) (interface still usable)  # scan:allow-fixture
+PASS: 1500 bytes of noise (interface still usable)  # scan:allow-fixture
+PASS: 65000 bytes of noise (interface still usable)  # scan:allow-fixture
+== structured but wrong
+PASS: initiation-shaped packet with a zero MAC (interface still usable)  # scan:allow-fixture
+PASS: S4 prefix with no payload (interface still usable)  # scan:allow-fixture
+== handshake still possible afterwards
+PASS: port change accepted after the flood  # scan:allow-fixture
+PASS: teardown after the flood  # scan:allow-fixture
+
+RESULT: all cases survived
+== matrix-test
+== 1. S1-S4: 0..1280, then EINVAL
+PASS: awgs1 0  # scan:allow-fixture
+PASS: awgs1 1280 (max)  # scan:allow-fixture
+PASS: awgs1 1281 (max+1)  # scan:allow-fixture
+PASS: awgs2 0  # scan:allow-fixture
+PASS: awgs2 1280 (max)  # scan:allow-fixture
+PASS: awgs2 1281 (max+1)  # scan:allow-fixture
+PASS: awgs3 on legacy is refused  # scan:allow-fixture
+== 2. junk: Jc 0..64, Jmin/Jmax 0..1500, and the jmin/jmax relation
+PASS: awgjc 0  # scan:allow-fixture
+PASS: awgjc 64 (max)  # scan:allow-fixture
+PASS: awgjc 65 (max+1)  # scan:allow-fixture
+PASS: awgjc 64 with jmin 0  # scan:allow-fixture
+PASS: awgjmax 1500 (max)  # scan:allow-fixture
+PASS: awgjmax 1501 (max+1)  # scan:allow-fixture
+PASS: jc 4 with jmin 0  # scan:allow-fixture
+PASS: jc 4 with jmin > jmax  # scan:allow-fixture
+PASS: jc 0 with jmin > jmax (no junk sent)  # scan:allow-fixture
+== 3. H1-H4: single values on legacy, ranges and no overlap on 3.1
+PASS: legacy single H values  # scan:allow-fixture
+PASS: legacy H range  # scan:allow-fixture
+PASS: version 3.1  # scan:allow-fixture
+PASS: 3.1 disjoint ranges  # scan:allow-fixture
+PASS: 3.1 overlapping H1/H2  # scan:allow-fixture
+PASS: 3.1 reversed range (ifconfig)  # scan:allow-fixture
+PASS: 3.1 disjoint ranges again  # scan:allow-fixture
+== 4. header protection needs S1-S4 >= 12 (its nonce is taken from them)
+PASS: s1-s4 12 with a key  # scan:allow-fixture
+PASS: s4 11 with a key  # scan:allow-fixture
+PASS: key cleared, short prefixes accepted again  # scan:allow-fixture
+== 5. timings: bounds, ordering, and reject > keepalive + rekey
+PASS: awgrekeyaftertime 65535  # scan:allow-fixture
+PASS: awgrekeyaftertime 65536 (ifconfig)  # scan:allow-fixture
+PASS: reversed timing range (ifconfig)  # scan:allow-fixture
+PASS: reject 1-2 with pka 10-12 (sum in one call)  # scan:allow-fixture
+PASS: reject 170-190 with pka 10-12  # scan:allow-fixture
+PASS: cpa 0-32  # scan:allow-fixture
+== 6. I1-I5 signature descriptors
+PASS: I1 with a constant, random tail and timestamp  # scan:allow-fixture
+PASS: I1 at the UDP payload bound  # scan:allow-fixture
+PASS: I1 above the bound  # scan:allow-fixture
+PASS: I1 unclosed tag  # scan:allow-fixture
+PASS: I1 unknown modifier  # scan:allow-fixture
+PASS: I1 cleared  # scan:allow-fixture
+== 7. version switching
+PASS: back to legacy  # scan:allow-fixture
+PASS: legacy with an S3 value  # scan:allow-fixture
+PASS: 3.1 again  # scan:allow-fixture
+PASS: legacy again (reset path)  # scan:allow-fixture
+PASS: 3.1 once more (reset path, twice in a row)  # scan:allow-fixture
+PASS: legacy once more (reset path, twice in a row)  # scan:allow-fixture
+== 8. teardown
+PASS: awg0 destroy  # scan:allow-fixture
+
+RESULT: all cases passed
+== stress-test
+== 1. version switch while a peer and traffic exist
+PASS: 200 version switches survived  # scan:allow-fixture
+== 2. parameter churn while packets arrive
+PASS: parameter churn with traffic survived  # scan:allow-fixture
+== 3. peer add/remove churn
+PASS: peer and allowed-ip churn survived  # scan:allow-fixture
+== 4. the interface still works afterwards
+PASS: port change accepted  # scan:allow-fixture
+PASS: configuration still readable  # scan:allow-fixture
+PASS: teardown  # scan:allow-fixture
+
+RESULT: all cases passed
+lab tests: all cases passed

@@ -15,6 +15,22 @@ SRCDIR=/usr/src/sys
 IFCFG_SRC=/usr/src/sbin/ifconfig
 CDN=https://cdn.openbsd.org/pub/OpenBSD
 
+# AWG-014: root fetches and verifies, an unprivileged account compiles, root
+# installs. AWG-029: /bsd and /sbin/ifconfig are backed up and restored as a pair.
+AWG_BUILD_USER=${AWG_BUILD_USER:-_awgbuild}
+BUILD_USER=""
+ALLOW_ROOT_BUILD=no
+INSTALL_DB=/var/db/awg-install
+MANIFEST=$INSTALL_DB/manifest
+BSD_FILE=/bsd
+IFCFG_FILE=/sbin/ifconfig
+BSD_BACKUP=/bsd.awg-prev
+IFCFG_BACKUP=/sbin/ifconfig.awg-prev
+IFAWG_HEADER=/usr/include/net/if_awg.h
+IFAWG_BACKUP=/usr/include/net/if_awg.h.awg-prev
+ROLLBACK_KERNEL_ONLY=no
+BACKUP_PAIR_DONE=no
+
 # Nothing here may live at a predictable /tmp path: this script runs as root
 # and an unprivileged user can pre-create a symlink at a fixed name. The work
 # directory holds the release tarballs (~300 MB), so prefer /usr/src when it
@@ -34,6 +50,91 @@ step() { echo ""; echo "──── $* ────"; }
 
 check_root() {
     [ "$(id -u)" -eq 0 ] || die "Run as root"
+}
+
+# Resolve the account that compiles. Only two values are possible: the
+# configured builder, or root when --allow-root-build was passed explicitly.
+# No silent fallback: a missing account is an operator action item.
+resolve_build_user() {
+    [ -n "$BUILD_USER" ] && return 0
+    if [ "$ALLOW_ROOT_BUILD" = yes ]; then
+        BUILD_USER=root
+        log "WARNING: building as root (--allow-root-build): recovery mode, the"
+        log "WARNING: tree is compiled from a location other accounts may alter"
+        return 0
+    fi
+    id -u "$AWG_BUILD_USER" >/dev/null 2>&1 \
+        || die "build user $AWG_BUILD_USER does not exist — create it first: useradd -s /sbin/nologin $AWG_BUILD_USER"
+    BUILD_USER="$AWG_BUILD_USER"
+    log "Building as $BUILD_USER"
+}
+
+# Print "trusted", or "untrusted: <path> owner <user> mode <mode>" for the first
+# path component that root must not trust. A component is trusted when it is
+# owned by the builder, or owned by root and not group/other writable (AWG-014).
+tree_trust() {
+    local p=$1 owner mode perm gw ow
+    [ -e "$p" ] || { echo "untrusted: $p does not exist"; return 0; }
+    while :; do
+        owner=$(stat -f '%Su' "$p" 2>/dev/null) || { echo "untrusted: $p cannot be stat'ed"; return 0; }
+        mode=$(stat -f '%Sp' "$p" 2>/dev/null)
+        perm=${mode#?}
+        # rwxrwxrwx minus the type char: 1-3 owner, 4-6 group, 7-9 other.
+        gw=$(printf '%s' "$perm" | cut -c5)
+        ow=$(printf '%s' "$perm" | cut -c9)
+        if [ "$owner" != "$BUILD_USER" ] && [ "$owner" != root ]; then
+            echo "untrusted: $p owner $owner mode $mode (not $BUILD_USER)"
+            return 0
+        fi
+        if [ "$owner" = root ] && { [ "$gw" = w ] || [ "$ow" = w ]; }; then
+            echo "untrusted: $p owner $owner mode $mode (group/other writable)"
+            return 0
+        fi
+        [ "$p" = / ] && break
+        p=$(dirname "$p")
+    done
+    echo "trusted"
+}
+
+check_tree_trust() {
+    local verdict=$1
+    verdict=$(tree_trust "$1")
+    [ "$verdict" = trusted ] || die "untrusted source tree: $verdict — $2"
+}
+
+# Hand the staged tree to the builder so config/make can write their objects.
+hand_tree_to_builder() {
+    local dir=$1
+    resolve_build_user
+    [ "$BUILD_USER" = root ] && { log "Staged tree stays root-owned (--allow-root-build)"; return 0; }
+    log "Handing $dir to build user $BUILD_USER"
+    chown -R "$BUILD_USER" "$dir" || die "cannot hand $dir to $BUILD_USER"
+}
+
+# builder_run <workdir> <command>: run one shell command as the build user.
+builder_run() {   # builder_run <workdir> <command>
+    local dir=$1 cmd=$2
+    resolve_build_user
+    [ -n "$BUILD_USER" ] || die "build user not resolved"
+    if [ "$BUILD_USER" = root ]; then
+        ( cd "$dir" && sh -c "$cmd" )
+    else
+        ( cd "$dir" && doas -u "$BUILD_USER" sh -c "$cmd" )
+    fi
+}
+
+# Every make in this script goes through builder_make, so the log names the
+# account that compiled and root only runs make with --allow-root-build.
+builder_make() {   # builder_make <workdir> [make args...]
+    local dir=$1 cmd
+    shift
+    for a in "$@"; do cmd="$cmd \"$a\""; done
+    resolve_build_user
+    [ -n "$BUILD_USER" ] || die "build user not resolved before running make"
+    [ "$BUILD_USER" != root ] || [ "$ALLOW_ROOT_BUILD" = yes ] \
+        || die "build user resolved to root without --allow-root-build"
+    log "building as $BUILD_USER"
+    builder_run "$dir" "make$cmd"
 }
 
 # Verify a downloaded release file against the release's signed SHA256 list.
@@ -162,10 +263,12 @@ install_ifconfig() {
     # No base headers are changed until source identity/patch gates pass.
     cp "$REPODIR/src/if_awg.h" /usr/include/net/if_awg.h
 
-    # Build and install
+    # Build and install. The build runs as the builder account; root only
+    # installs the artifact (AWG-014).
+    check_tree_trust "$IFCFG_SRC" "rebuild the management tool from a tree the builder can write"
+    hand_tree_to_builder "$IFCFG_SRC"
     log "Building ifconfig"
-    cd "$IFCFG_SRC"
-    make || die "ifconfig build failed"
+    builder_make "$IFCFG_SRC" || die "ifconfig build failed"
     # The binary is in obj/ if that exists
     install -c -s -o root -g bin -m 555 "$(make -V .OBJDIR)/ifconfig" /sbin/ifconfig
     install -c -o root -g bin -m 444 ifconfig.8 /usr/share/man/man8/ifconfig.8
@@ -241,17 +344,19 @@ kernel_build() {
             || die "conf/files patch failed — wg_cookie.c entry not found"
     fi
 
-    log "Configuring AWG.MP"
-    cd "$SRCDIR/arch/amd64/conf"
-    config AWG.MP
+    # The verified tree is handed to the builder before config/make write into
+    # it; root keeps only the fetch/verify/install roles (AWG-014).
+    check_tree_trust "$SRCDIR" "the kernel build writes its objects here"
+    hand_tree_to_builder "$SRCDIR"
 
-    log "Building kernel — this takes ~15 minutes"
-    cd "$SRCDIR/arch/amd64/compile/AWG.MP"
+    log "Configuring AWG.MP"
+    builder_run "$SRCDIR/arch/amd64/conf" "config AWG.MP"
+
     # Not `make | tee`: the pipeline reports tee's status, so a build that died
     # half-way looks like a success and the installer carries on to install a
     # kernel that was never produced. Log to the file, report on failure.
     log "Building kernel — this takes ~15 minutes (log: $LOGFILE)"
-    if ! make -j"$(sysctl -n hw.ncpu)" >> "$LOGFILE" 2>&1; then
+    if ! builder_make "$SRCDIR/arch/amd64/compile/AWG.MP" -j"$(sysctl -n hw.ncpu)" >> "$LOGFILE" 2>&1; then
         tail -20 "$LOGFILE" >&2
         die "kernel build failed (full log: $LOGFILE)"
     fi
@@ -290,6 +395,9 @@ build_kernel_only() {
 install_kernel() {
     local bsd
 
+    # AWG-029: capture the kernel + management tool pair before anything is
+    # replaced, so a failed upgrade can put both back.
+    write_backup_pair
     kernel_build
     bsd=$(kernel_object_path)
     verify_kernel_artifact "$bsd"
@@ -301,12 +409,8 @@ install_kernel() {
     chmod 700 /bsd.awg-staging
     chown root:wheel /bsd.awg-staging
 
-    if [ -f /bsd ]; then
-        log "Keeping the kernel being replaced as /bsd.awg-prev"
-        cp -p /bsd /bsd.awg-prev || die "could not save /bsd"
-        # The bootloader falls back to /obsd; keep it in step with the backup.
-        ln -f /bsd /obsd 2>/dev/null || cp -p /bsd /obsd 2>/dev/null || true
-    fi
+    # The bootloader falls back to /obsd; keep it in step with the backup.
+    ln -f "$BSD_BACKUP" /obsd 2>/dev/null || cp -p "$BSD_BACKUP" /obsd 2>/dev/null || true
 
     install -F -m 700 /bsd.awg-staging /bsd || die "could not install /bsd"
     rm -f /bsd.awg-staging
@@ -318,29 +422,136 @@ install_kernel() {
     log "If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh $0 --rollback"
 }
 
-rollback_kernel() {
-    local failed
+# Release that produced this tree: git tag/commit, else the operator-provided
+# AWG_RELEASE_TAG, else "unknown". Recorded so a rollback can be attributed.
+release_tag() {
+    local tag=""
+    if command -v git >/dev/null 2>&1; then
+        tag=$(git -C "$REPODIR" describe --tags --always 2>/dev/null || true)
+    fi
+    [ -n "$tag" ] || tag=${AWG_RELEASE_TAG:-unknown}
+    printf '%s' "$tag"
+}
 
-    step "Rollback to the previous kernel"
-    [ -f /bsd.awg-prev ] \
-        || die "no /bsd.awg-prev to roll back to — boot /obsd from the bootloader instead"
+# AWG-029: record the identity of the kernel and its management tool, then back
+# up both (plus the shared header). The manifest is what --rollback verifies
+# against and what --check compares the running pair to.
+write_backup_pair() {
+    local bsd_sha ifc_sha hdr_sha
 
-    if cmp -s /bsd /bsd.awg-prev; then
-        log "/bsd already matches /bsd.awg-prev — nothing to do"
+    if [ "$BACKUP_PAIR_DONE" = yes ]; then
+        log "Backup pair already taken this run — keeping it"
         return 0
     fi
-    failed="/bsd.failed.$(date +%Y%m%d%H%M%S)"
-    cp -p /bsd "$failed" 2>/dev/null && log "Current kernel kept as $failed"
-    install -F -m 700 /bsd.awg-prev /bsd || die "could not restore /bsd"
-    sha256 -h /var/db/kernel.SHA256 /bsd 2>/dev/null || true
-    cmp -s /bsd.awg-prev /bsd || die "/bsd does not match the restored kernel"
-    log "Previous kernel restored — reboot to activate it"
+    BACKUP_PAIR_DONE=yes
+    step "Backup pair"
+    [ -f "$BSD_FILE" ] || die "no $BSD_FILE to back up"
+    [ -f "$IFCFG_FILE" ] || die "no $IFCFG_FILE to back up"
+    bsd_sha=$(sha256 -q "$BSD_FILE") || die "cannot hash $BSD_FILE"
+    ifc_sha=$(sha256 -q "$IFCFG_FILE") || die "cannot hash $IFCFG_FILE"
+    hdr_sha=""
+    if [ -f "$IFAWG_HEADER" ]; then hdr_sha=$(sha256 -q "$IFAWG_HEADER"); fi
+
+    mkdir -p "$INSTALL_DB" || die "cannot create $INSTALL_DB"
+    chown root:wheel "$INSTALL_DB" 2>/dev/null || true
+    chmod 700 "$INSTALL_DB" || die "cannot set mode on $INSTALL_DB"
+    {
+        printf 'schema=1\n'
+        printf 'timestamp=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'uname_r=%s\n' "$(uname -r)"
+        printf 'uname_v=%s\n' "$(uname -v)"
+        printf 'release_tag=%s\n' "$(release_tag)"
+        printf 'bsd_sha256=%s\n' "$bsd_sha"
+        printf 'ifconfig_sha256=%s\n' "$ifc_sha"
+        printf 'if_awg_h_sha256=%s\n' "$hdr_sha"
+    } > "$MANIFEST" || die "cannot write $MANIFEST"
+    chmod 600 "$MANIFEST" || die "cannot set mode on $MANIFEST"
+
+    cp -p "$BSD_FILE" "$BSD_BACKUP" || die "could not save $BSD_FILE to $BSD_BACKUP"
+    cp -p "$IFCFG_FILE" "$IFCFG_BACKUP" || die "could not save $IFCFG_FILE to $IFCFG_BACKUP"
+    if [ -f "$IFAWG_HEADER" ]; then
+        cp -p "$IFAWG_HEADER" "$IFAWG_BACKUP" || log "warning: could not back up $IFAWG_HEADER"
+    fi
+    log "Backed up the pair: $BSD_BACKUP + $IFCFG_BACKUP (manifest: $MANIFEST)"
+}
+
+# manifest_get <key>: read one value out of the backup manifest.
+manifest_get() {   # manifest_get <file> <key>
+    awk -v k="$2" -F= '$1 == k { print substr($0, length(k) + 2); exit }' "$1"
+}
+
+# restore_pair_member <backup> <target> <expected-sha256> <mode> <group>
+restore_pair_member() {
+    local src=$1 dst=$2 want=$3 mode=$4 group=$5 got
+    [ -f "$src" ] || { echo "missing backup $src" >&2; return 1; }
+    got=$(sha256 -q "$src") || { echo "cannot hash $src" >&2; return 1; }
+    if [ -n "$want" ] && [ "$got" != "$want" ]; then
+        echo "$src sha256 $got does not match the manifest ($want)" >&2
+        return 1
+    fi
+    install -F -o root -g "$group" -m "$mode" "$src" "$dst" \
+        || { echo "could not install $dst from $src" >&2; return 1; }
+    cmp -s "$src" "$dst" || { echo "$dst does not match $src after install" >&2; return 1; }
+    log "Restored $dst (sha256 $got)"
+    return 0
+}
+
+# Restore the pair. With --rollback-kernel-only only /bsd is restored, which is
+# documented as unsafe because the management tool may not match the kernel.
+rollback_pair() {
+    local stamp safety_bsd safety_ifc bsd_sha ifc_sha
+
+    step "Rollback to the previous kernel/ifconfig pair"
+    [ -f "$MANIFEST" ] || die "no backup manifest at $MANIFEST — nothing to roll back"
+    bsd_sha=$(manifest_get "$MANIFEST" bsd_sha256)
+    ifc_sha=$(manifest_get "$MANIFEST" ifconfig_sha256)
+    [ -n "$bsd_sha" ] || die "manifest $MANIFEST records no bsd_sha256"
+
+    if [ "$ROLLBACK_KERNEL_ONLY" != yes ]; then
+        [ -n "$ifc_sha" ] || die "manifest $MANIFEST records no ifconfig_sha256"
+        [ -f "$IFCFG_BACKUP" ] \
+            || die "no $IFCFG_BACKUP: the backup pair is incomplete — pass --rollback-kernel-only to restore /bsd alone (unsafe: kernel and management tool may not match)"
+    fi
+    [ -f "$BSD_BACKUP" ] || die "no $BSD_BACKUP to roll back to — boot /obsd from the bootloader instead"
+
+    # Safety copies of the *current* pair: a half-failed restore is undone from
+    # these, so the pair is never left half-new/half-old.
+    stamp=$(date +%Y%m%d%H%M%S)
+    safety_bsd="$BSD_FILE.awg-safety.$stamp"
+    safety_ifc="$IFCFG_FILE.awg-safety.$stamp"
+    if [ -f "$BSD_FILE" ]; then
+        cp -p "$BSD_FILE" "$safety_bsd" 2>/dev/null && log "Current kernel kept as $safety_bsd"
+    fi
+    if [ -f "$IFCFG_FILE" ]; then
+        cp -p "$IFCFG_FILE" "$safety_ifc" 2>/dev/null && log "Current ifconfig kept as $safety_ifc"
+    fi
+
+    if [ "$ROLLBACK_KERNEL_ONLY" != yes ]; then
+        if ! restore_pair_member "$IFCFG_BACKUP" "$IFCFG_FILE" "$ifc_sha" 555 bin; then
+            if [ -f "$safety_ifc" ]; then cp -p "$safety_ifc" "$IFCFG_FILE" 2>/dev/null; fi
+            die "ifconfig rollback failed: $IFCFG_FILE kept from $safety_ifc, $BSD_FILE untouched (pair not applied)"
+        fi
+    fi
+    if ! restore_pair_member "$BSD_BACKUP" "$BSD_FILE" "$bsd_sha" 700 wheel; then
+        if [ -f "$safety_bsd" ]; then cp -p "$safety_bsd" "$BSD_FILE" 2>/dev/null; fi
+        if [ "$ROLLBACK_KERNEL_ONLY" != yes ] && [ -f "$safety_ifc" ]; then
+            cp -p "$safety_ifc" "$IFCFG_FILE" 2>/dev/null
+        fi
+        die "kernel rollback failed: $BSD_FILE restored from $safety_bsd, pair kept together"
+    fi
+    sha256 -h /var/db/kernel.SHA256 "$BSD_FILE" 2>/dev/null \
+        || log "warning: could not update /var/db/kernel.SHA256 (syspatch will ask to rebuild it)"
+    if [ "$ROLLBACK_KERNEL_ONLY" = yes ]; then
+        log "Kernel-only rollback: $BSD_FILE restored, $IFCFG_FILE left as-is"
+    else
+        log "Pair restored: $BSD_FILE + $IFCFG_FILE — reboot to activate the kernel"
+    fi
 }
 
 # Report what an install would do and stop. Nothing is written, so this is safe
 # to run on a production box before a maintenance window.
 check_plan() {
-    local rc=0 key ver ifcfg_ver
+    local rc=0 key ver ifcfg_ver m_tag m_v m_bsd m_ifc bsd_sha ifc_sha trust v
 
     step "Pre-flight check"
     ver=$(uname -r)
@@ -373,17 +584,68 @@ check_plan() {
     fi
 
     printf 'running kernel: %s\n' "$(uname -v)"
-    if [ -f /bsd.awg-prev ]; then
-        printf 'rollback      : /bsd.awg-prev present\n'
+
+    # AWG-029: report the kernel + management tool pair against the manifest.
+    if [ -f "$MANIFEST" ]; then
+        m_tag=$(manifest_get "$MANIFEST" release_tag)
+        m_v=$(manifest_get "$MANIFEST" uname_v)
+        m_bsd=$(manifest_get "$MANIFEST" bsd_sha256)
+        m_ifc=$(manifest_get "$MANIFEST" ifconfig_sha256)
+        printf 'manifest      : %s (release_tag %s, kernel %s)\n' "$MANIFEST" "$m_tag" "$m_v"
+        bsd_sha=$(sha256 -q "$BSD_FILE" 2>/dev/null || true)
+        if [ -n "$m_bsd" ] && [ "$bsd_sha" = "$m_bsd" ]; then
+            printf 'kernel sha256 : matches manifest\n'
+        else
+            printf 'kernel sha256 : MISMATCH (%s vs manifest %s)\n' "${bsd_sha:-unreadable}" "$m_bsd"
+            rc=1
+        fi
+        ifc_sha=$(sha256 -q "$IFCFG_FILE" 2>/dev/null || true)
+        if [ -n "$m_ifc" ] && [ "$ifc_sha" = "$m_ifc" ]; then
+            printf 'ifconfig sha  : matches manifest\n'
+        else
+            printf 'ifconfig sha  : MISMATCH (%s vs manifest %s)\n' "${ifc_sha:-unreadable}" "$m_ifc"
+            rc=1
+        fi
     else
-        printf 'rollback      : none yet (the first install keeps the current /bsd)\n'
+        printf 'manifest      : no %s yet (nothing installed by this installer)\n' "$MANIFEST"
     fi
+
+    if [ -x "$IFCFG_FILE" ] && grep -aq awgversion "$IFCFG_FILE" 2>/dev/null; then
+        printf 'ifconfig awg  : awgversion supported\n'
+    else
+        printf 'ifconfig awg  : no awgversion support (--tools-only adds it)\n'
+    fi
+
+    if [ -f "$BSD_BACKUP" ] && [ -f "$IFCFG_BACKUP" ]; then
+        printf 'rollback      : pair present (%s + %s)\n' "$BSD_BACKUP" "$IFCFG_BACKUP"
+    elif [ -f "$BSD_BACKUP" ]; then
+        printf 'rollback      : PARTIAL %s only (--rollback needs --rollback-kernel-only)\n' "$BSD_BACKUP"
+    elif [ -f "$IFCFG_BACKUP" ]; then
+        printf 'rollback      : PARTIAL %s only (--rollback needs --rollback-kernel-only)\n' "$IFCFG_BACKUP"
+    else
+        printf 'rollback      : none yet (the first install keeps the current pair)\n'
+    fi
+
+    # AWG-014: which account compiles, and is the tree it compiles from trusted.
+    resolve_build_user
+    printf 'build user    : %s\n' "$BUILD_USER"
+    trust=$(tree_trust "$SRCDIR")
+    printf 'src trust     : %s (%s)\n' "$trust" "$SRCDIR"
+    [ "$trust" = trusted ] || rc=1
+    if [ -d "$IFCFG_SRC" ]; then
+        v=$(tree_trust "$IFCFG_SRC")
+        printf 'ifconfig trust: %s (%s)\n' "$v" "$IFCFG_SRC"
+        [ "$v" = trusted ] || rc=1
+    fi
+
     printf 'disk free     : %s\n' "$(df -h / | awk 'NR==2 {print $4}')"
 
     printf '\nplan: %s\n' \
-        'fetch+verify sources, copy src/ into the tree, patch conf/files, config AWG.MP,'
+        'fetch+verify sources as root, hand the verified tree to the build user,'
     printf '      %s\n' \
-        'build, verify the artifact, stage it, keep /bsd as /bsd.awg-prev, install, reboot.'
+        'config AWG.MP + make as that user, verify the artifact, stage it,'
+    printf '      %s\n' \
+        'back up /bsd + /sbin/ifconfig as a pair, install, reboot.'
     [ "$rc" -eq 0 ] || printf '\nresult: %s\n' 'a precondition above would fail — fix it before running --kernel-only'
     [ "$rc" -eq 0 ] && printf '\nresult: ready\n'
     exit "$rc"
@@ -450,19 +712,35 @@ setup_pf_mss() {
 
 usage() {
     cat <<EOF
-Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | --all] [--pf]
+Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | --all]
+          [--pf] [--rollback-kernel-only] [--allow-root-build]
 
   --check        Report what would be done and stop (nothing is changed)
   --tools-only   Patch ifconfig + install awg-quick (no reboot needed)
   --build-only   Build the kernel and stop; /bsd is not touched
   --kernel-only  Build and install AWG kernel (requires reboot)
   --all          Install everything: tools + kernel (default)
-  --rollback     Put the previous /bsd back (see /bsd.awg-prev)
+  --rollback     Put the previous /bsd + /sbin/ifconfig pair back
+  --rollback-kernel-only
+                 With --rollback: restore /bsd only and leave /sbin/ifconfig
+                 as-is. Unsafe: the kernel and its management tool may not
+                 match; use it when only the ifconfig backup is missing.
+  --allow-root-build
+                 Compile as root instead of the build user. Recovery only:
+                 the tree is then writable by other accounts (AWG-014).
   --pf           Also add the MSS clamp rule to an existing /etc/pf.conf
                  (default: print the rule and leave the firewall alone)
 
-The kernel is staged and verified before /bsd is replaced, and the kernel it
-replaces is kept as /bsd.awg-prev so --rollback works without the bootloader.
+Environment:
+  AWG_BUILD_USER   Account that runs config/make (default: _awgbuild).
+                   Create it with: useradd -s /sbin/nologin _awgbuild
+  AWG_RELEASE_TAG  Release tag recorded in the backup manifest (default: git
+                   describe of the repo, else "unknown")
+
+The kernel is staged and verified before /bsd is replaced. The kernel and
+/sbin/ifconfig are kept as a pair: /bsd.awg-prev + /sbin/ifconfig.awg-prev,
+recorded in /var/db/awg-install/manifest, so --rollback restores both without
+the bootloader.
 
 After --all or --kernel-only: reboot to activate the AWG kernel.
 Place your config in /etc/amnezia/amneziawg/<name>.conf, then:
@@ -476,23 +754,27 @@ MODE=all
 EDIT_PF=no
 for arg in "$@"; do
     case "$arg" in
-        --tools-only)  MODE=tools ;;
-        --kernel-only) MODE=kernel ;;
-        --build-only)  MODE=build ;;
-        --rollback)    MODE=rollback ;;
-        --check)       MODE=check ;;
-        --all)         MODE=all ;;
-        --pf)          EDIT_PF=yes ;;
-        -h|--help)     usage ;;
+        --tools-only)          MODE=tools ;;
+        --kernel-only)         MODE=kernel ;;
+        --build-only)          MODE=build ;;
+        --rollback)            MODE=rollback ;;
+        --check)               MODE=check ;;
+        --all)                 MODE=all ;;
+        --pf)                  EDIT_PF=yes ;;
+        --rollback-kernel-only) ROLLBACK_KERNEL_ONLY=yes ;;
+        --allow-root-build)    ALLOW_ROOT_BUILD=yes ;;
+        -h|--help)             usage ;;
         *) die "Unknown option: $arg. Run $0 --help for usage." ;;
     esac
 done
 
 check_root
+resolve_build_user
 : > "$LOGFILE"
 
 case "$MODE" in
     tools)
+        write_backup_pair
         install_packages
         install_ifconfig
         install_awg_quick
@@ -508,12 +790,13 @@ case "$MODE" in
         build_kernel_only
         ;;
     rollback)
-        rollback_kernel
+        rollback_pair
         ;;
     check)
         check_plan
         ;;
     all)
+        write_backup_pair
         install_packages
         fetch_sys_sources
         install_ifconfig

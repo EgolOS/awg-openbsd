@@ -395,20 +395,25 @@ see [`docs/RUNBOOK-sysupgrade.md`](docs/RUNBOOK-sysupgrade.md).
 
 ## Development checks
 
-The repository carries its own gates. Only `make check-vm` and `make baseline`
-need a running OpenBSD system; the rest run anywhere.
+The repository carries its own gates. `make check` runs anywhere;
+the others need the lab VMs described in `tools/lab/README.md`.
 
 | Command | What it proves |
 | --- | --- |
 | `make check` | shell syntax, the Python tools compile, the publish scan is clean, `awg-openbsd.patch` matches `src/` |
-| `make check-vm` | copies `tools/lab/smoke-test.sh` into the lab VM and runs it as root; exits non-zero on any failing case |
+| `make check-vm` | four gates in one VM: `smoke-test` (lifecycle, handshake, malformed input), `wire-test`, `matrix-test` (every parameter at its bound), `stress-test` (200 version switches under traffic) |
+| `make check-interop` | two VMs, real link: 3.1 handshake, ICMP through the tunnel, 8 MiB transfer, counters |
 | `make baseline TREE=/usr/src/sys` | function-level divergence against a stock OpenBSD tree, checked against the recorded baseline |
+| `make manifest KERNEL=…` | release metadata: kernel/patch/tool hashes, versions, test results |
 
 Design and maintenance documents:
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — receive and transmit paths, locking, peer state, ioctl contract
 - [`docs/UPSTREAM-TRACKING.md`](docs/UPSTREAM-TRACKING.md) — the 8.0 baseline, which functions diverge, how to move the baseline to a new release
 - [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) — findings register: what was found, what is fixed, which test proves it
+- [`docs/LOCKING.md`](docs/LOCKING.md) — lock inventory, what a torn obfuscation read can do, the H1–H4 decision
+- [`docs/RUNBOOK-security-updates.md`](docs/RUNBOOK-security-updates.md) — what `syspatch` does to a custom kernel and how to rebuild
+- [`docs/ADMIN-INTERFACE.md`](docs/ADMIN-INTERFACE.md) — why the `ifconfig` patch stays and `awgctl` is not built
 
 ## Upstream
 
@@ -470,5 +475,12 @@ sbin/
     ifconfig_awg.patch            patch for /sbin/ifconfig to add awg* flags
 awg-openbsd.patch                 unified diff of all kernel changes
 generate-patch.sh                 regenerates awg-openbsd.patch from src/
-install.sh                        build + install script
+install.sh                        staged build + install (--check/--build-only/--rollback)
+Makefile                          make check, check-vm, check-interop, baseline, manifest
+docs/                             architecture, upstream tracking, security register,
+                                  locking, testing, runbooks
+tools/                            publish scan, upstream diff, sync check, release
+                                  manifest, lab VM scripts
+.github/workflows/ci.yml          host checks on every push; kernel build on a
+                                  self-hosted OpenBSD runner
 ```

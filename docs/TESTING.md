@@ -92,8 +92,11 @@ ping -c 1 10.8.9.2      # pre-fix: kernel panics here
 
 | Client | Status |
 |---|---|
-| AmneziaWG for Android/Windows (legacy 2.0) | verified |
-| `amneziawg-go` (3.1) | verified |
-| Linux kernel module (3.1) | verified on the wire, not yet with `HeaderProtectionKey` |
+| `awg(4)` to `awg(4)`, two VMs, 3.1 | **verified here** — `make check-interop` |
+| AmneziaWG for Android/Windows (legacy 2.0) | reported by the upstream fork, not re-run here |
+| `amneziawg-go` (3.1) | reported by the upstream fork, not re-run here |
+| Linux kernel module (3.1) | reported by the upstream fork; not re-run, and not with `HeaderProtectionKey` |
 
-Anything not in this table is untested — say so in the release notes.
+The two-VM lab has no third machine, so the first row is the only client
+interoperability this repository can claim. Anything not in this table is
+untested — say so in the release notes.

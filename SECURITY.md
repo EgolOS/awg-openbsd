@@ -72,3 +72,11 @@ and permission fixes above close the accidental paths, not the deliberate one.
 4. Run `pf(4)` with a default-deny policy and allow only the AWG UDP port.
 5. Enable `ddb.panic=0` on production hosts so a panic reboots instead of
    dropping to the debugger, and make sure the console is reachable.
+
+## Where the findings went
+
+Every entry in the table above has an id, a state and a regression test in
+[`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md). Two of the open rows are
+analysed in [`docs/LOCKING.md`](docs/LOCKING.md). Rebuilding after a security
+update — the step operators get wrong — is in
+[`docs/RUNBOOK-security-updates.md`](docs/RUNBOOK-security-updates.md).

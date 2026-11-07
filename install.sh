@@ -13,7 +13,20 @@ SCRIPT=$(readlink -f "$0")
 REPODIR=$(dirname "$SCRIPT")
 SRCDIR=/usr/src/sys
 IFCFG_SRC=/usr/src/sbin/ifconfig
-LOGFILE=/tmp/awg-install.log
+CDN=https://cdn.openbsd.org/pub/OpenBSD
+
+# Nothing here may live at a predictable /tmp path: this script runs as root
+# and an unprivileged user can pre-create a symlink at a fixed name. The work
+# directory holds the release tarballs (~300 MB), so prefer /usr/src when it
+# exists: on a VPS / is small and /tmp lives on it.
+LOGFILE=$(mktemp /tmp/awg-install-log.XXXXXX) || { echo "mktemp failed" >&2; exit 1; }
+chmod 600 "$LOGFILE"
+if [ -d /usr/src ] && [ -w /usr/src ]; then
+    WORK=$(mktemp -d /usr/src/.awg-install.XXXXXX) || exit 1
+else
+    WORK=$(mktemp -d /tmp/awg-install-work.XXXXXX) || exit 1
+fi
+trap 'rm -rf "$WORK"' EXIT
 
 log()  { echo "==> $*"; echo "==> $*" >> "$LOGFILE"; }
 die()  { echo "ERROR: $*" >&2; exit 1; }
@@ -21,6 +34,25 @@ step() { echo ""; echo "──── $* ────"; }
 
 check_root() {
     [ "$(id -u)" -eq 0 ] || die "Run as root"
+}
+
+# Verify a downloaded release file against the release's signed SHA256 list.
+# signify(1) and /etc/signify are part of a stock OpenBSD install, so a file
+# that cannot be verified must stop the install, not warn.
+verify_release_file() {		# verify_release_file <filename>
+    local name=$1 ver key sig
+    ver=$(uname -r)
+    key="/etc/signify/openbsd-$(echo "$ver" | tr -d '.')-base.pub"
+    [ -f "$key" ] || die "missing release key $key — cannot verify $name (install signify keys or fetch sources manually)"
+    sig="$WORK/SHA256.sig"
+    [ -f "$sig" ] || ftp -o "$sig" "$CDN/$ver/SHA256.sig" \
+        || die "cannot fetch $CDN/$ver/SHA256.sig — refusing to build from unverified sources"
+    ( cd "$WORK" && signify -C -p "$key" -x "$sig" ) > "$WORK/sigcheck.log" 2>&1 || true
+    grep -q 'Signature Verified' "$WORK/sigcheck.log" \
+        || die "$name: SHA256.sig did not verify against $key"
+    grep -q "^$name: OK$" "$WORK/sigcheck.log" \
+        || die "$name: signature check failed (see $WORK/sigcheck.log)"
+    log "Verified $name against $key"
 }
 
 # ── 1. System packages ────────────────────────────────────────────────────────
@@ -44,13 +76,13 @@ fetch_sys_sources() {
     if [ ! -f "$SRCDIR/net/if_wg.c" ] || ! grep -q 'OpenBSD' "$SRCDIR/dev/rasops/files.rasops" 2>/dev/null; then
         local ver url
         ver=$(uname -r)
-        url="https://cdn.openbsd.org/pub/OpenBSD/${ver}/sys.tar.gz"
+        url="$CDN/${ver}/sys.tar.gz"
         log "Fetching kernel sources from $url"
         mkdir -p /usr/src
-        ftp -o /tmp/sys.tar.gz "$url" 2>/dev/null \
+        ftp -o "$WORK/sys.tar.gz" "$url" \
             || die "Failed to download $url — CDN only carries 7.7+. Download manually and extract to /usr/src"
-        tar -C /usr/src -xzf /tmp/sys.tar.gz || die "Failed to extract sys.tar.gz"
-        rm -f /tmp/sys.tar.gz
+        verify_release_file sys.tar.gz
+        tar -C /usr/src -xzf "$WORK/sys.tar.gz" || die "Failed to extract sys.tar.gz"
         [ -f "$SRCDIR/net/if_wg.c" ] || die "sys.tar.gz extracted but $SRCDIR/net/if_wg.c not found"
         log "Kernel sources installed to /usr/src/sys"
     else
@@ -72,14 +104,26 @@ install_ifconfig() {
     local PATCH="$REPODIR/sbin/ifconfig/ifconfig_awg.patch"
     [ -f "$PATCH" ] || die "Patch not found: $PATCH"
 
+    # If a kernel tree is present it must match the running release: the
+    # ioctl ABI in the patch follows it. --tools-only does not download the
+    # tree, so this is a check, not a requirement.
+    if [ -f "$SRCDIR/conf/newvers.sh" ]; then
+        local srcver
+        srcver=$(sed -n 's/^osr="\(.*\)"$/\1/p' "$SRCDIR/conf/newvers.sh")
+        [ "$srcver" = "$(uname -r)" ] \
+            || log "WARNING: $SRCDIR is OpenBSD $srcver, system is $(uname -r)"
+    fi
+
     # Fetch ifconfig sources from CDN if not present
     if [ ! -f "$IFCFG_SRC/ifconfig.c" ]; then
         local ver url
         ver=$(uname -r)
-        url="https://cdn.openbsd.org/pub/OpenBSD/${ver}/src.tar.gz"
-        log "Fetching userland sources (streaming sbin/ifconfig only) from $url"
-        ftp -o - "$url" 2>/dev/null \
-            | tar -C /usr/src -xzf - sbin/ifconfig \
+        url="$CDN/${ver}/src.tar.gz"
+        log "Fetching userland sources from $url"
+        ftp -o "$WORK/src.tar.gz" "$url" \
+            || die "Failed to download $url"
+        verify_release_file src.tar.gz
+        tar -C /usr/src -xzf "$WORK/src.tar.gz" sbin/ifconfig \
             || die "Failed to extract sbin/ifconfig from src.tar.gz"
         [ -f "$IFCFG_SRC/ifconfig.c" ] || die "ifconfig.c not found after extraction"
         log "ifconfig sources extracted to $IFCFG_SRC"
@@ -199,8 +243,10 @@ setup_confdir() {
     if [ ! -d /etc/amnezia/amneziawg ]; then
         log "Creating /etc/amnezia/amneziawg"
         mkdir -p /etc/amnezia/amneziawg
-        chmod 700 /etc/amnezia/amneziawg
     fi
+    # The directory holds private keys; enforce 0700 even when it already
+    # existed with a looser mode.
+    chmod 700 /etc/amnezia/amneziawg
 }
 
 # ── 7. pf MSS clamping ────────────────────────────────────────────────────────
@@ -287,7 +333,6 @@ check_root
 case "$MODE" in
     tools)
         install_packages
-        fetch_sys_sources
         install_ifconfig
         install_awg_quick
         setup_confdir

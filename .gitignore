@@ -15,3 +15,4 @@ tools/lab/install.conf
 *.qcow2
 *.iso
 *.img
+__pycache__/

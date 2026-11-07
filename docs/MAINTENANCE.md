@@ -21,6 +21,9 @@ python3 tools/sync-check.py --base /tmp/sys80/sys/net/if_wg.c \
                             --new  /tmp/sys81/sys/net/if_wg.c
 ```
 
+`sync-check.py` exits non-zero when anything needs action — conflicts, but also
+functions added or removed upstream — so it can gate a release script.
+
 The report sorts upstream changes into three piles:
 
 | Mark | Meaning | What to do |

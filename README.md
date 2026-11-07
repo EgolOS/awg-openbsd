@@ -177,9 +177,22 @@ doas awg-quick up myvpn
 doas awg-quick down myvpn
 ```
 
-If `AllowedIPs` contains IPv6 networks (e.g. `::/0`) but `Address` has no IPv6 address, `awg-quick` skips those routes with a warning; IPv6 traffic then bypasses the tunnel.
+If `AllowedIPs` contains IPv6 networks (e.g. `::/0`) but `Address` has no IPv6 address, `awg-quick` refuses to bring the tunnel up — see below.
 
 `awg-quick` configures the tunnel entirely via `ifconfig`. If the config filename matches an `awgN` pattern (e.g. `awg0.conf`), that interface is used directly; otherwise the next free `awg0`, `awg1`, … is allocated.
+
+The private key is never put on a command line: `awg-quick` feeds it to
+`ifconfig awgN awgkey -` on stdin, because the argument vector of a root
+process is readable with `ps(1)` and lands in core dumps. Pre-/post-up hooks
+(`%i`/`%I` substitution) still run as root shell — treat a config file as a
+root program: only copy configs you trust, and keep them `0600` in a `0700`
+directory.
+
+If `AllowedIPs` contains IPv6 networks (e.g. `::/0`) but `Address` has no IPv6
+address, `awg-quick` refuses to bring the tunnel up: the route cannot be
+installed and the traffic it was meant to cover would leave through the
+physical interface. Add an IPv6 address, drop the `::/0` entry, or export
+`AWG_ALLOW_IPV6_BYPASS=1` to accept the leak explicitly.
 
 ### Show tunnel status
 
@@ -222,7 +235,7 @@ Because AWG is fully integrated into `ifconfig`, you can configure interfaces ma
 
 ```sh
 ifconfig awg0 create
-ifconfig awg0 awgkey <private-key-base64>
+ifconfig awg0 awgkey -            # reads the base64 key from stdin (or: awgkey <base64>)
 ifconfig awg0 awgport 51820
 ifconfig awg0 awgjc 4 awgjmin 10 awgjmax 50
 ifconfig awg0 awgs1 26 awgs2 33
@@ -329,6 +342,12 @@ AmneziaWG 3.1 only (`Version = 3.1`):
 | `PersistentKeepalive` (peer) | May be a range | — |
 
 `HeaderProtectionKey`, `S1`–`S4`, `H1`–`H4` and `RandomTrailers` must match on both endpoints; `I1`–`I5`, junk packets, `ContentPaddingAddition` and the timings are local.
+
+`S4` (and any content padding) is added *outside* the tunnel MTU, so the
+datagram that leaves the host is `mtu + S4 + padding` bytes. With a large `S4`
+lower the interface MTU by the same amount (`MTU = 1420 - S4`, or set `MTU`
+explicitly in `[Interface]`) — otherwise every transport packet is fragmented,
+which is exactly the fingerprint the `I1`–`I5` MTU check exists to avoid.
 
 The 3.1 mode also talks to AmneziaWG 2.x peers (`S3`, `S4`, `H1`–`H4` ranges, `I1`–`I5`) as long as the 3.x-only parameters are not set.
 

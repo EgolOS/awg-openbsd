@@ -58,13 +58,48 @@ GATEWAY4=""
 GATEWAY6=""
 
 cmd() {
-	echo "[#] $*" >&3
+	# Key material is passed to ifconfig as an argument (awgkey/awgpsk/
+	# awghpk). Never echo those values: stderr ends up in logs, cron mail
+	# and rc.local output.
+	local shown=( ) a redact=0
+	for a in "$@"; do
+		if (( redact )); then
+			shown+=( "<redacted>" ); redact=0; continue
+		fi
+		shown+=( "$a" )
+		case "$a" in
+		awgkey|awgpsk|awghpk|-awgkey|-awgpsk|-awghpk) redact=1 ;;
+		esac
+	done
+	echo "[#] ${shown[*]}" >&3
 	"$@"
 }
 
 die() {
 	echo "$PROGRAM: $*" >&2
 	exit 1
+}
+
+# Every numeric config field is validated here, once, before it reaches
+# ifconfig or a shell arithmetic context. `(( ))` and `[[ -lt ]]` evaluate
+# their operands as arithmetic expressions, so an unvalidated config value
+# is code execution, not just a bad value.
+need_uint() {	# need_uint <Field> <value> [max]
+	local field=$1 v=$2 max=${3:-4294967295}
+	[[ $v =~ ^[0-9]+$ ]] || die "$field must be a decimal number, got \`$v'"
+	[[ ${#v} -le 10 ]] || die "$field is out of range: \`$v'"
+	(( 10#$v <= max )) || die "$field must be <= $max, got \`$v'"
+}
+
+need_range() {	# need_range <Field> <value> [max] — value or low-high
+	local field=$1 v=$2 max=${3:-65535}
+	if [[ $v == *-* ]]; then
+		need_uint "$field low" "${v%%-*}" "$max"
+		need_uint "$field high" "${v#*-}" "$max"
+		(( ${v%%-*} <= ${v#*-} )) || die "$field range must be low-high, got \`$v'"
+	else
+		need_uint "$field" "$v" "$max"
+	fi
 }
 
 parse_options() {
@@ -80,6 +115,17 @@ parse_options() {
 		die "The config file must be a valid interface name, followed by .conf"
 	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
 	INTERFACE="${BASH_REMATCH[2]}"
+
+	# The config holds the long-term private key and can carry PreUp/PostUp
+	# commands that run as root. Refuse one other users can read.
+	local mode
+	mode=$(stat -f %Lp "$CONFIG_FILE" 2>/dev/null) || die "cannot stat $CONFIG_FILE"
+	case "$mode" in
+	600|400) ;;
+	*) die "$CONFIG_FILE is mode $mode — it holds the private key; chmod 600 it" ;;
+	esac
+	mode=$(stat -f %Lp "$(dirname "$CONFIG_FILE")" 2>/dev/null)
+	[[ $mode == 700 ]] || echo "[!] WARNING: $(dirname "$CONFIG_FILE") is mode $mode, expected 700" >&2
 
 	flush_peer() {
 		[[ -n $cur_pubkey ]] || return 0
@@ -166,6 +212,34 @@ parse_options() {
 
 	[[ -n $PRIVATE_KEY ]] || die "PrivateKey not set in $CONFIG_FILE"
 
+	# Numeric fields, validated once (see need_uint): they are interpolated
+	# into ifconfig arguments and shell arithmetic, so a non-numeric value
+	# is a code-execution vector, not a config error.
+	[[ -z $LISTEN_PORT ]] || need_uint ListenPort "$LISTEN_PORT" 65535
+	[[ -z $MTU ]] || need_uint MTU "$MTU" 65535
+	[[ -z $JC ]] || need_uint Jc "$JC" 64
+	[[ -z $JMIN ]] || need_uint Jmin "$JMIN" 1500
+	[[ -z $JMAX ]] || need_uint Jmax "$JMAX" 1500
+	[[ -z $S1 ]] || need_uint S1 "$S1" 1280
+	[[ -z $S2 ]] || need_uint S2 "$S2" 1280
+	[[ -z $S3 ]] || need_uint S3 "$S3" 1280
+	[[ -z $S4 ]] || need_uint S4 "$S4" 1280
+	[[ -z $H1 ]] || need_range H1 "$H1" 4294967295
+	[[ -z $H2 ]] || need_range H2 "$H2" 4294967295
+	[[ -z $H3 ]] || need_range H3 "$H3" 4294967295
+	[[ -z $H4 ]] || need_range H4 "$H4" 4294967295
+	[[ -z $CPA ]] || need_range ContentPaddingAddition "$CPA" 65535
+	[[ -z $REKEY_AFTER_TIME ]] || need_range RekeyAfterTime "$REKEY_AFTER_TIME" 65535
+	[[ -z $REKEY_TIMEOUT ]] || need_range RekeyTimeout "$REKEY_TIMEOUT" 65535
+	[[ -z $REJECT_AFTER_TIME ]] || need_range RejectAfterTime "$REJECT_AFTER_TIME" 65535
+	[[ -z $KEEPALIVE_TIMEOUT ]] || need_range KeepaliveTimeout "$KEEPALIVE_TIMEOUT" 65535
+	[[ -z $MAX_HANDSHAKE_ATTEMPTS ]] || need_range MaxHandshakeAttempts "$MAX_HANDSHAKE_ATTEMPTS" 65535
+	[[ -z $cur_pka ]] || need_range PersistentKeepalive "$cur_pka" 65535
+	local p
+	for (( p=0; p<PEER_COUNT; p++ )); do
+		[[ -z ${PEER_PKAS[$p]} ]] || need_range PersistentKeepalive "${PEER_PKAS[$p]}" 65535
+	done
+
 	# Version: legacy (AmneziaWG < 3.1) or 3.1. Without it, a config
 	# using any 3.1-only parameter selects 3.1.
 	VERSION="${VERSION,,}"
@@ -177,8 +251,11 @@ parse_options() {
 	*)      die "Version must be legacy or 3.1, got \`$VERSION'" ;;
 	esac
 
-	# The kernel takes the header protection nonce from the S1-S4 prefixes
-	if [[ -n $HPK ]] && (( ${S1:-0} < 12 || ${S2:-0} < 12 || ${S3:-0} < 12 || ${S4:-0} < 12 )); then
+	# The kernel takes the header protection nonce from the S1-S4 prefixes.
+	# The values are digits-only by now (need_uint above); keep them in
+	# locals so the arithmetic context never re-parses config text.
+	local s1=${S1:-0} s2=${S2:-0} s3=${S3:-0} s4=${S4:-0}
+	if [[ -n $HPK ]] && (( s1 < 12 || s2 < 12 || s3 < 12 || s4 < 12 )); then
 		die "HeaderProtectionKey requires S1, S2, S3 and S4 of at least 12"
 	fi
 
@@ -267,7 +344,9 @@ set_config() {
 
 	[[ -n $PRIVATE_KEY ]] || die "no PrivateKey"
 	args+=( awgversion "$VERSION" )
-	args+=( awgkey "$PRIVATE_KEY" )
+	# The private key is fed on stdin (`awgkey -`): the argument vector of a
+	# root process is readable with ps(1) and lands in core dumps.
+	args+=( awgkey - )
 	[[ -n $LISTEN_PORT ]] && args+=( awgport "$LISTEN_PORT" )
 
 	# AWG obfuscation params
@@ -325,7 +404,7 @@ set_config() {
 		done
 	done
 
-	cmd ifconfig "$REAL_INTERFACE" "${args[@]}"
+	printf '%s\n' "$PRIVATE_KEY" | cmd ifconfig "$REAL_INTERFACE" "${args[@]}"
 }
 
 add_addr() {
@@ -442,10 +521,15 @@ add_route() {
 	local family ifaceroute
 	if [[ $1 == *:* ]]; then
 		family=inet6
-		# Provider configs often carry ::/0 without an IPv6 Address
+		# Provider configs often carry ::/0 without an IPv6 Address. Such a
+		# route cannot be installed, and the traffic it was meant to cover
+		# leaves through the physical interface instead: fail closed.
 		if [[ -z $FIRSTADDR6 ]]; then
-			echo "[!] WARNING: no IPv6 Address set, skipping route $1" >&2
-			return 0
+			if [[ ${AWG_ALLOW_IPV6_BYPASS:-0} == 1 ]]; then
+				echo "[!] WARNING: no IPv6 Address set, skipping route $1" >&2
+				return 0
+			fi
+			die "AllowedIPs has $1 but no IPv6 Address is set: IPv6 traffic would bypass the tunnel. Set an IPv6 Address, drop $1, or export AWG_ALLOW_IPV6_BYPASS=1 to accept the leak"
 		fi
 		ifaceroute="$FIRSTADDR6"
 	else

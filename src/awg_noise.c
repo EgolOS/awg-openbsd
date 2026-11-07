@@ -103,7 +103,7 @@ awg_noise_local_init(struct awg_noise_local *l, struct awg_noise_upcall *upcall)
 void
 awg_noise_local_set_timings(struct awg_noise_local *l, uint16_t rekey_lo,
     uint16_t rekey_hi, uint16_t reject_lo, uint16_t reject_hi,
-    uint16_t recv_margin)
+    uint32_t recv_margin)
 {
 	/* Read without locking by the data path, like the other AWG params */
 	l->l_rekey_after_lo = rekey_lo;

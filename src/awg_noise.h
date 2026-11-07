@@ -133,8 +133,11 @@ struct awg_noise_local {
 	/* Session timings in seconds, lo/hi 0 = WireGuard default */
 	uint16_t		l_rekey_after_lo, l_rekey_after_hi;
 	uint16_t		l_reject_after_lo, l_reject_after_hi;
-	/* REKEY_AFTER_TIME_RECV = RejectAfterTime - l_recv_margin */
-	uint16_t		l_recv_margin;
+	/* REKEY_AFTER_TIME_RECV = RejectAfterTime - l_recv_margin. 32 bits:
+	 * the configured sum (KeepaliveTimeout + RekeyTimeout, each up to
+	 * 65535) does not fit in 16, and truncating it moved the receiving
+	 * rekey point past the configured one. */
+	uint32_t		l_recv_margin;
 };
 
 /* Set/Get noise parameters */
@@ -145,7 +148,7 @@ int	awg_noise_local_set_private(struct awg_noise_local *, uint8_t[NOISE_PUBLIC_K
 int	awg_noise_local_keys(struct awg_noise_local *, uint8_t[NOISE_PUBLIC_KEY_LEN],
 	    uint8_t[NOISE_PUBLIC_KEY_LEN]);
 void	awg_noise_local_set_timings(struct awg_noise_local *, uint16_t, uint16_t,
-	    uint16_t, uint16_t, uint16_t);
+	    uint16_t, uint16_t, uint32_t);
 
 void	awg_noise_remote_init(struct awg_noise_remote *, uint8_t[NOISE_PUBLIC_KEY_LEN],
 	    struct awg_noise_local *);

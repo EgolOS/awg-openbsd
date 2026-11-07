@@ -123,7 +123,10 @@ def main():
     print()
     print(f"RESULT: {len(added)} added, {len(removed)} removed, "
           f"{len(mechanical)} mechanical, {len(conflicts)} conflict(s)")
-    return 1 if conflicts else 0
+    # Added/removed upstream functions need action too (copy in and re-wire
+    # callers, or delete locally) — exiting 0 there would let a release sync
+    # look clean when it silently dropped a code path.
+    return 1 if (conflicts or added or removed) else 0
 
 
 if __name__ == "__main__":

@@ -8,10 +8,11 @@ compiles the kernel inside the guest.
 
 | File | Purpose |
 |---|---|
-| `install.conf.example` | autoinstall(8) response file — copy to `install.conf` and set a password |
+| `install.conf.example` | autoinstall(8) response file — copy to `install.conf`, set a password and an ssh key |
 | `install_vm.py` | boots the ISO, answers `bsd.rd` over serial, runs the autoinstall |
 | `start_vm.sh` | starts a VM: user-mode NIC for ssh/http + a private L2 socket between the pair |
 | `build-in-vm.sh` | fetches `sys.tar.gz` + `driver.tgz` from the host, builds `AWG.MP` and the patched `ifconfig` |
+| `smoke-test.sh` | PASS/FAIL gate inside the guest: bounds, key handling, handshake over loopback, malformed input |
 | `serial_read.py` | dumps the serial console to a file — the only way to read a panic after the fact |
 
 ## Bring-up

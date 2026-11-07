@@ -1,5 +1,5 @@
---- /dev/null	Tue Oct 20 05:19:09 2026
-+++ net/if_awg.h	Tue Oct 20 05:19:09 2026
+--- /dev/null	Sat Nov  7 19:36:25 2026
++++ net/if_awg.h	Sat Nov  7 19:36:25 2026
 @@ -0,0 +1,174 @@
 +/*	$OpenBSD: if_awg.h,v 1.1 2026/09/24 00:00:00 truebad0ur Exp $ */
 +
@@ -176,9 +176,9 @@
 +
 +#endif /* __IF_AWG_H__ */
 
---- /dev/null	Tue Oct 20 05:19:09 2026
-+++ net/if_awg.c	Tue Oct 20 05:19:09 2026
-@@ -0,0 +1,3813 @@
+--- /dev/null	Sat Nov  7 19:36:25 2026
++++ net/if_awg.c	Sat Nov  7 19:36:25 2026
+@@ -0,0 +1,3945 @@
 +/*	$OpenBSD: if_awg.c,v 1.2 2026/10/20 00:00:00 truebad0ur Exp $ */
 +
 +/*
@@ -261,6 +261,10 @@
 +#define UNDERLOAD_TIMEOUT	1
 +
 +#define AWG_DEFAULT_UDP_WINDOW	500	/* initial peer UDP window, 3.1 */
++#define AWG_MAX_UDP_WINDOW	1500	/* clamp: largest payload a tunnel MTU carries */
++#define AWG_MAX_PADDING		1280	/* S1-S4/S3/S4 upper bound (min IPv6 MTU) */
++#define AWG_MAX_JUNK		64	/* Jc upper bound; upstream recommends 4-12 */
++#define AWG_MAX_JUNK_SIZE	1500	/* junk packets are built in a 1500-byte buffer */
 +#define AWG_MAX_UDP_PAYLOAD	65507
 +
 +#define AWGPRINTF(loglevel, sc, mtx, fmt, ...) do {		\
@@ -491,6 +495,9 @@
 +
 +	struct task		 sc_handshake;
 +	struct mbuf_queue	 sc_handshake_queue;
++	/* Underload hysteresis for cookie ratelimiting: per interface, so a
++	 * flood on one awg(4) does not push another into cookie mode. */
++	struct timeval		 sc_awg_last_underload;
 +
 +	struct task		 sc_encap;
 +	struct task		 sc_decap;
@@ -1177,10 +1184,29 @@
 +	int		 ret = 0;
 +	size_t		 mlen = len + max_hdr;
 +
++	/*
++	 * m_clget() panics on requests above MAXMCLBYTES, and m_align()
++	 * asserts that it was given a cluster when the data does not fit in
++	 * the header.  Both are reachable from a configured S1-S4 or from a
++	 * peer that inflated p_udp_window, so refuse instead of panicking.
++	 */
++	if (mlen > MAXMCLBYTES) {
++		AWGPRINTF(LOG_DEBUG, sc, NULL, "awg_send_buf: %zu bytes, too "
++		    "large for a cluster\n", mlen);
++		return;
++	}
++
 +retry:
 +	m = m_gethdr(M_WAIT, MT_DATA);
-+	if (mlen > MHLEN)
++	if (mlen > MHLEN) {
 +		MCLGETL(m, M_WAIT, mlen);
++		if (!ISSET(m->m_flags, M_EXT)) {
++			AWGPRINTF(LOG_DEBUG, sc, NULL, "awg_send_buf: no "
++			    "cluster for %zu bytes\n", mlen);
++			m_freem(m);
++			return;
++		}
++	}
 +	m_align(m, len);
 +	m->m_pkthdr.len = m->m_len = len;
 +	memcpy(mtod(m, void *), buf, len);
@@ -1352,6 +1378,13 @@
 +void
 +awg_peer_update_udp_window(struct awg_peer *peer, uint32_t size)
 +{
++	/*
++	 * The window bounds the padding added to outgoing packets, so an
++	 * unchained peer could otherwise ask us to emit 64 KB datagrams.
++	 * Clamp it to the largest payload a tunnel MTU can carry.
++	 */
++	if (size > AWG_MAX_UDP_WINDOW)
++		size = AWG_MAX_UDP_WINDOW;
 +	/* Racy on purpose, the window only grows and is advisory */
 +	if (peer->p_udp_window < size)
 +		peer->p_udp_window = size;
@@ -1401,7 +1434,7 @@
 +		}
 +		for (p = desc; (p = strchr(p, '<')) != NULL; p = end + 1) {
 +			if ((end = strchr(p, '>')) == NULL)
-+				return EINVAL;
++				goto bad;
 +			for (key = p + 1; key < end && *key == ' '; key++)
 +				;
 +			for (keylen = 0; key + keylen < end &&
@@ -1422,10 +1455,10 @@
 +					vallen -= 2;
 +				}
 +				if (vallen == 0 || vallen % 2 != 0)
-+					return EINVAL;
++					goto bad;
 +				for (i = 0; i < vallen; i++)
 +					if (awg_hexval(val[i]) < 0)
-+						return EINVAL;
++						goto bad;
 +				len = vallen / 2;
 +				if (pass == 1)
 +					for (i = 0; i < len; i++)
@@ -1445,20 +1478,20 @@
 +				    key[1] == 'c' ? AWG_ISPEC_MOD_CHARS :
 +				    AWG_ISPEC_MOD_DIGITS;
 +				if (vallen == 0)
-+					return EINVAL;
++					goto bad;
 +				for (i = 0; i < vallen; i++) {
 +					if (val[i] < '0' || val[i] > '9')
-+						return EINVAL;
++						goto bad;
 +					len = len * 10 + (val[i] - '0');
 +					if (len > AWG_MAX_UDP_PAYLOAD)
-+						return EINVAL;
++						goto bad;
 +				}
 +			} else {
-+				return EINVAL;
++				goto bad;
 +			}
 +
 +			if (pktlen + len > AWG_MAX_UDP_PAYLOAD)
-+				return EINVAL;
++				goto bad;
 +			if (type != 0) {
 +				if (pass == 1) {
 +					mods[nmods].im_type = type;
@@ -1479,6 +1512,14 @@
 +	is->is_mods = mods;
 +	is->is_mods_count = mods_size;
 +	return 0;
++bad:
++	if (pass == 1) {
++		if (pkt != NULL)
++			free(pkt, M_DEVBUF, pkt_size);
++		if (mods != NULL)
++			free(mods, M_DEVBUF, mods_size * sizeof(*mods));
++	}
++	return EINVAL;
 +}
 +
 +void
@@ -1947,6 +1988,13 @@
 +		is = &sc->sc_awg_ispec[i];
 +		if (is->is_pkt_len == 0)
 +			continue;
++		if (is->is_pkt_len > sc->sc_if.if_mtu) {
++			/* Fragmented signature packets look suspicious */
++			AWGPRINTF(LOG_DEBUG, sc, NULL, "I%zu is %zu bytes, "
++			    "above mtu %u, skipped\n", i + 1,
++			    is->is_pkt_len, sc->sc_if.if_mtu);
++			continue;
++		}
 +		if ((buf = malloc(is->is_pkt_len, M_TEMP, M_NOWAIT)) == NULL)
 +			break;
 +		memcpy(buf, is->is_pkt, is->is_pkt_len);
@@ -2111,21 +2159,21 @@
 +	struct awg_pkt_cookie		*cook;
 +	struct awg_peer			*peer;
 +	struct awg_noise_remote		*remote;
-+	int				 res, underload = 0;
-+	static struct timeval		 awg_last_underload; /* microuptime */
-+	char				 ipaddr[INET6_ADDRSTRLEN];
++	int			 res, underload = 0;
++	char			 ipaddr[INET6_ADDRSTRLEN];
 +
 +	if (sc->sc_awg_disable_cookies) {
 +		/* DisableCookies: never ask for a cookie, never ratelimit */
 +		underload = 0;
 +	} else if (mq_len(&sc->sc_handshake_queue) >= MAX_QUEUED_HANDSHAKES/8) {
-+		getmicrouptime(&awg_last_underload);
++		getmicrouptime(&sc->sc_awg_last_underload);
 +		underload = 1;
-+	} else if (awg_last_underload.tv_sec != 0) {
-+		if (!ratecheck(&awg_last_underload, &awg_underload_interval))
++	} else if (sc->sc_awg_last_underload.tv_sec != 0) {
++		if (!ratecheck(&sc->sc_awg_last_underload, &awg_underload_interval))
 +			underload = 1;
 +		else
-+			bzero(&awg_last_underload, sizeof(awg_last_underload));
++			bzero(&sc->sc_awg_last_underload,
++			    sizeof(sc->sc_awg_last_underload));
 +	}
 +
 +	t = awg_tag_get(m);
@@ -2340,6 +2388,20 @@
 +	plaintext_len = m->m_pkthdr.len + padding_len;
 +	out_len = s4 + sizeof(struct awg_pkt_data) + plaintext_len +
 +	    NOISE_AUTHTAG_LEN;
++
++	/*
++	 * m_clget() panics on requests above MAXMCLBYTES (and, without
++	 * DIAGNOSTIC, hands a NULL pool to pool_get()). A jumbo MTU plus the
++	 * S4 prefix and the padding window crosses that bound, and MTU is a
++	 * root-set value the driver must not panic on: drop instead.
++	 */
++	if (out_len + max_hdr > MAXMCLBYTES) {
++		AWGPRINTF(LOG_ERR, sc, NULL, "encap: %zu bytes exceeds the "
++		    "largest cluster (mtu %u, s4 %u); raise the limit or "
++		    "lower the mtu/s4\n", out_len + max_hdr,
++		    sc->sc_if.if_mtu, s4);
++		goto error;
++	}
 +
 +	/*
 +	 * For the time being we allocate a new packet with sufficient size to
@@ -2835,6 +2897,7 @@
 +	uint32_t	 key = key0 & sc->sc_index_mask;
 +
 +	mtx_enter(&sc->sc_index_mtx);
++	iter = NULL;
 +	LIST_FOREACH(iter, &sc->sc_index[key], i_entry)
 +		if (iter->i_key == key0) {
 +			LIST_REMOVE(iter, i_entry);
@@ -2842,9 +2905,16 @@
 +		}
 +	mtx_leave(&sc->sc_index_mtx);
 +
++	/*
++	 * The key may already be gone (a second free path for the same
++	 * keypair). A double drop must be a no-op, not a NULL dereference:
++	 * KASSERT() after the dereference cannot save the kernel here.
++	 */
++	if (iter == NULL)
++		return;
++
 +	/* We expect a peer */
 +	peer = CONTAINER_OF(iter->i_value, struct awg_peer, p_remote);
-+	KASSERT(peer != NULL);
 +	SLIST_INSERT_HEAD(&peer->p_unused_index, iter, i_unused_entry);
 +}
 +
@@ -3194,6 +3264,56 @@
 +	s[1] = f & AWG_INTERFACE_HAS_S12 ? io->i_s2 : sc->sc_awg_s2;
 +	s[2] = f & AWG_INTERFACE_HAS_S3 ? io->i_s3 : sc->sc_awg_s3;
 +	s[3] = f & AWG_INTERFACE_HAS_S4 ? io->i_s4 : sc->sc_awg_s4;
++	/*
++	 * The prefixes are prepended to a packet whose cluster is allocated
++	 * as padding + header; m_clget() panics above MAXMCLBYTES, so a
++	 * configuration value must never be able to reach it.
++	 */
++	for (i = 0; i < 4; i++)
++		if (s[i] > AWG_MAX_PADDING)
++			return EINVAL;
++	if (f & AWG_INTERFACE_HAS_JC) {
++		if (io->i_jc > AWG_MAX_JUNK ||
++		    io->i_jmin > AWG_MAX_JUNK_SIZE ||
++		    io->i_jmax > AWG_MAX_JUNK_SIZE)
++			return EINVAL;
++		/* Junk is built in a 1500-byte stack buffer and
++		 * awg_send_junk() bails out on jmin == 0 or jmin > jmax, so
++		 * such a config silently emits no junk at all — exactly the
++		 * fingerprint divergence the Jmax bound exists to prevent.
++		 * Refuse it while junk is enabled. */
++		if (io->i_jc != 0 &&
++		    (io->i_jmin == 0 || io->i_jmin > io->i_jmax))
++			return EINVAL;
++	}
++	/*
++	 * A keychain that expires before the next handshake can complete
++	 * rekeys on every packet. REKEY_AFTER_TIME_RECV is
++	 * RejectAfterTime - (KeepaliveTimeout + RekeyTimeout), and both are
++	 * drawn from ranges, so the *lowest* reject value must stay above the
++	 * *lowest* margin. Merge with the stored values: ifconfig may set the
++	 * three fields in separate calls.
++	 */
++	if (f & (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
++	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT |
++	    AWG_INTERFACE_HAS_REKEY_TIMEOUT)) {
++		struct awg_range rj, ka, rt;
++		int margin;
++
++		rj = (f & AWG_INTERFACE_HAS_REJECT_AFTER_TIME) ?
++		    io->i_reject_after_time : sc->sc_awg_reject_after_time;
++		ka = (f & AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT) ?
++		    io->i_keepalive_timeout : sc->sc_awg_keepalive_timeout;
++		rt = (f & AWG_INTERFACE_HAS_REKEY_TIMEOUT) ?
++		    io->i_rekey_timeout : sc->sc_awg_rekey_timeout;
++		if (!awg_range_is_zero(rj)) {
++			margin = (awg_range_is_zero(ka) ? KEEPALIVE_TIMEOUT :
++			    ka.r_lo) + (awg_range_is_zero(rt) ? REKEY_TIMEOUT :
++			    rt.r_lo);
++			if (rj.r_lo <= margin)
++				return EINVAL;
++		}
++	}
 +	if (f & AWG_INTERFACE_HAS_HPK) {
 +		for (has_hpk = 0, i = 0; i < AWG_HPK_LEN; i++)
 +			has_hpk |= io->i_hpk[i];
@@ -3433,8 +3553,20 @@
 +	/* AmneziaWG obfuscation parameters, validated by awg_ioctl_check */
 +	if (iface_o.i_flags & AWG_INTERFACE_HAS_VERSION &&
 +	    iface_o.i_version != sc->sc_awg_version) {
-+		if (iface_o.i_version == AWG_VERSION_LEGACY)
-+			awg_reset_3_1(sc, ispec);
++		if (iface_o.i_version == AWG_VERSION_LEGACY) {
++			struct awg_ispec dropped[AWG_ISPEC_COUNT];
++
++			/*
++			 * awg_reset_3_1() moves the interface's current
++			 * I1-I5 into the array it is handed. That must not be
++			 * the freshly parsed ispec[]: it would free the new
++			 * values and hand the old ones back to the install
++			 * loop below, resurrecting them.
++			 */
++			awg_reset_3_1(sc, dropped);
++			for (i = 0; i < AWG_ISPEC_COUNT; i++)
++				awg_ispec_free(&dropped[i]);
++		}
 +		sc->sc_awg_version = iface_o.i_version;
 +	}
 +	if (iface_o.i_flags & AWG_INTERFACE_HAS_JC) {
@@ -3993,9 +4125,9 @@
 +			IPL_NET, 0, "awgratelimit", NULL);
 +}
 
---- /dev/null	Tue Oct 20 05:19:09 2026
-+++ net/awg_noise.h	Tue Oct 20 05:19:09 2026
-@@ -0,0 +1,212 @@
+--- /dev/null	Sat Nov  7 19:36:25 2026
++++ net/awg_noise.h	Sat Nov  7 19:36:25 2026
+@@ -0,0 +1,215 @@
 +/*	$OpenBSD: awg_noise.h,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
 + * Copyright (C) 2026 Andrey Orekhov <pieceofcakecupofcoffee@gmail.com>
@@ -4131,8 +4263,11 @@
 +	/* Session timings in seconds, lo/hi 0 = WireGuard default */
 +	uint16_t		l_rekey_after_lo, l_rekey_after_hi;
 +	uint16_t		l_reject_after_lo, l_reject_after_hi;
-+	/* REKEY_AFTER_TIME_RECV = RejectAfterTime - l_recv_margin */
-+	uint16_t		l_recv_margin;
++	/* REKEY_AFTER_TIME_RECV = RejectAfterTime - l_recv_margin. 32 bits:
++	 * the configured sum (KeepaliveTimeout + RekeyTimeout, each up to
++	 * 65535) does not fit in 16, and truncating it moved the receiving
++	 * rekey point past the configured one. */
++	uint32_t		l_recv_margin;
 +};
 +
 +/* Set/Get noise parameters */
@@ -4143,7 +4278,7 @@
 +int	awg_noise_local_keys(struct awg_noise_local *, uint8_t[NOISE_PUBLIC_KEY_LEN],
 +	    uint8_t[NOISE_PUBLIC_KEY_LEN]);
 +void	awg_noise_local_set_timings(struct awg_noise_local *, uint16_t, uint16_t,
-+	    uint16_t, uint16_t, uint16_t);
++	    uint16_t, uint16_t, uint32_t);
 +
 +void	awg_noise_remote_init(struct awg_noise_remote *, uint8_t[NOISE_PUBLIC_KEY_LEN],
 +	    struct awg_noise_local *);
@@ -4209,8 +4344,8 @@
 +
 +#endif /* __AWG_NOISE_H__ */
 
---- /dev/null	Tue Oct 20 05:19:09 2026
-+++ net/awg_noise.c	Tue Oct 20 05:19:09 2026
+--- /dev/null	Sat Nov  7 19:36:25 2026
++++ net/awg_noise.c	Sat Nov  7 19:36:25 2026
 @@ -0,0 +1,1405 @@
 +/*	$OpenBSD: awg_noise.c,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -4317,7 +4452,7 @@
 +void
 +awg_noise_local_set_timings(struct awg_noise_local *l, uint16_t rekey_lo,
 +    uint16_t rekey_hi, uint16_t reject_lo, uint16_t reject_hi,
-+    uint16_t recv_margin)
++    uint32_t recv_margin)
 +{
 +	/* Read without locking by the data path, like the other AWG params */
 +	l->l_rekey_after_lo = rekey_lo;
@@ -5625,3 +5760,11 @@
 @@ file net/if_wg.c
 +file net/if_awg.c			awg
 +file net/awg_noise.c			awg
+@@ net/wg_cookie.c
++ | awg
+@@ crypto/blake2s.c
++ | awg
+@@ crypto/curve25519.c
++ | awg
+@@ crypto/chachapoly.c
++ | awg

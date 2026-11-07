@@ -22,6 +22,13 @@ What the driver does **not** protect against:
 - **Anyone who can write the interface configuration** (`doas ifconfig`,
   root-owned `/etc/amnezia/*.conf`) can influence allocation sizes. Every
   config value is now validated, but a hostile root is out of scope.
+- **`DisableCookies = on` removes the pre-handshake gate.** With cookies
+  enabled, a sender must answer a cookie challenge and is rate limited per
+  address *before* the X25519 in `consume_initiation`; with it off, every
+  queued initiation costs one X25519 and only the bounded handshake queue
+  (`MAX_QUEUED_HANDSHAKES`) limits the work. Expect remote CPU load and
+  starvation of legitimate handshakes while a flood runs; leave cookies on
+  unless the peer implementation requires otherwise.
 - **Traffic analysis.** Obfuscation changes the wire format, not the timing
   or volume of traffic.
 
@@ -38,6 +45,22 @@ What the driver does **not** protect against:
 | `Jmax` above 1500 was silently ignored | The driver sent no junk packets at all, so the fingerprint differed from the Linux peers | **Fixed**: rejected with `EINVAL` |
 | Timings were not cross-checked | `RejectAfterTime` ≤ keepalive + rekey made every packet rekey | **Fixed**: rejected when both arrive in one call |
 | Obfuscation fields are read without a lock | A reconfiguration can drop packets mid-update | Open, documented in the source |
+| A jumbo MTU plus `S4` plus the padding window could exceed `MAXMCLBYTES` | `panic: m_clget` on transmit (and a NULL pool without DIAGNOSTIC) | **Fixed**: `awg_encap()` drops the packet instead |
+| `awg-quick` put the private key on the `ifconfig` command line | Key readable via `ps(1)`, in core dumps and in stderr logs | **Fixed**: `awgkey -` reads it from stdin; `cmd()` redacts key arguments |
+| Numeric config values reached a shell arithmetic context | `S1 = x[$(cmd)]` executed as root while parsing the config | **Fixed**: every numeric field is validated before use |
+| Config file and directory modes were assumed, not enforced | A `0644` config exposes the long-term private key | **Fixed**: `awg-quick` refuses a config that is not `0600`/`0400` |
+| IPv6 `::/0` with an IPv4-only `Address` silently bypassed the tunnel | IPv6 traffic left unencrypted while `up` exited 0 | **Fixed**: fails closed; `AWG_ALLOW_IPV6_BYPASS=1` opts in to the old behaviour |
+| `install.sh` built root-owned kernel sources and a base `ifconfig` from unverified downloads | Supply chain: whoever controls the download controls `/bsd` | **Fixed**: `SHA256.sig` verified with `signify(1)` before extraction |
+| `install.sh` wrote fixed paths under `/tmp` as root | A planted symlink could truncate or overwrite a root-owned file | **Fixed**: `mktemp` for the log and work directory |
+| `tools/publish-scan.py` WireGuard-key rule could never match | The publish gate reported "clean" for a leaked 44-character key | **Fixed**: lookahead instead of `\b`, `git ls-files -z`, unscanned files reported |
+
+## Userspace: config files are root programs
+
+`awg-quick` executes `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks with `eval` as
+root, which is the documented `wg-quick` behaviour. Combined with the fact that
+config content usually arrives from a VPN provider, this means: **a config file
+is a root program.** Only copy configs you trust; the private-key, arithmetic
+and permission fixes above close the accidental paths, not the deliberate one.
 
 ## Hardening checklist for deployments
 

@@ -314,6 +314,9 @@ struct awg_softc {
 
 	struct task		 sc_handshake;
 	struct mbuf_queue	 sc_handshake_queue;
+	/* Underload hysteresis for cookie ratelimiting: per interface, so a
+	 * flood on one awg(4) does not push another into cookie mode. */
+	struct timeval		 sc_awg_last_underload;
 
 	struct task		 sc_encap;
 	struct task		 sc_decap;
@@ -1250,7 +1253,7 @@ awg_ispec_parse(struct awg_ispec *is, const char *desc)
 		}
 		for (p = desc; (p = strchr(p, '<')) != NULL; p = end + 1) {
 			if ((end = strchr(p, '>')) == NULL)
-				return EINVAL;
+				goto bad;
 			for (key = p + 1; key < end && *key == ' '; key++)
 				;
 			for (keylen = 0; key + keylen < end &&
@@ -1271,10 +1274,10 @@ awg_ispec_parse(struct awg_ispec *is, const char *desc)
 					vallen -= 2;
 				}
 				if (vallen == 0 || vallen % 2 != 0)
-					return EINVAL;
+					goto bad;
 				for (i = 0; i < vallen; i++)
 					if (awg_hexval(val[i]) < 0)
-						return EINVAL;
+						goto bad;
 				len = vallen / 2;
 				if (pass == 1)
 					for (i = 0; i < len; i++)
@@ -1294,20 +1297,20 @@ awg_ispec_parse(struct awg_ispec *is, const char *desc)
 				    key[1] == 'c' ? AWG_ISPEC_MOD_CHARS :
 				    AWG_ISPEC_MOD_DIGITS;
 				if (vallen == 0)
-					return EINVAL;
+					goto bad;
 				for (i = 0; i < vallen; i++) {
 					if (val[i] < '0' || val[i] > '9')
-						return EINVAL;
+						goto bad;
 					len = len * 10 + (val[i] - '0');
 					if (len > AWG_MAX_UDP_PAYLOAD)
-						return EINVAL;
+						goto bad;
 				}
 			} else {
-				return EINVAL;
+				goto bad;
 			}
 
 			if (pktlen + len > AWG_MAX_UDP_PAYLOAD)
-				return EINVAL;
+				goto bad;
 			if (type != 0) {
 				if (pass == 1) {
 					mods[nmods].im_type = type;
@@ -1328,6 +1331,14 @@ awg_ispec_parse(struct awg_ispec *is, const char *desc)
 	is->is_mods = mods;
 	is->is_mods_count = mods_size;
 	return 0;
+bad:
+	if (pass == 1) {
+		if (pkt != NULL)
+			free(pkt, M_DEVBUF, pkt_size);
+		if (mods != NULL)
+			free(mods, M_DEVBUF, mods_size * sizeof(*mods));
+	}
+	return EINVAL;
 }
 
 void
@@ -1967,21 +1978,21 @@ awg_handshake(struct awg_softc *sc, struct mbuf *m)
 	struct awg_pkt_cookie		*cook;
 	struct awg_peer			*peer;
 	struct awg_noise_remote		*remote;
-	int				 res, underload = 0;
-	static struct timeval		 awg_last_underload; /* microuptime */
-	char				 ipaddr[INET6_ADDRSTRLEN];
+	int			 res, underload = 0;
+	char			 ipaddr[INET6_ADDRSTRLEN];
 
 	if (sc->sc_awg_disable_cookies) {
 		/* DisableCookies: never ask for a cookie, never ratelimit */
 		underload = 0;
 	} else if (mq_len(&sc->sc_handshake_queue) >= MAX_QUEUED_HANDSHAKES/8) {
-		getmicrouptime(&awg_last_underload);
+		getmicrouptime(&sc->sc_awg_last_underload);
 		underload = 1;
-	} else if (awg_last_underload.tv_sec != 0) {
-		if (!ratecheck(&awg_last_underload, &awg_underload_interval))
+	} else if (sc->sc_awg_last_underload.tv_sec != 0) {
+		if (!ratecheck(&sc->sc_awg_last_underload, &awg_underload_interval))
 			underload = 1;
 		else
-			bzero(&awg_last_underload, sizeof(awg_last_underload));
+			bzero(&sc->sc_awg_last_underload,
+			    sizeof(sc->sc_awg_last_underload));
 	}
 
 	t = awg_tag_get(m);
@@ -2196,6 +2207,20 @@ awg_encap(struct awg_softc *sc, struct mbuf *m)
 	plaintext_len = m->m_pkthdr.len + padding_len;
 	out_len = s4 + sizeof(struct awg_pkt_data) + plaintext_len +
 	    NOISE_AUTHTAG_LEN;
+
+	/*
+	 * m_clget() panics on requests above MAXMCLBYTES (and, without
+	 * DIAGNOSTIC, hands a NULL pool to pool_get()). A jumbo MTU plus the
+	 * S4 prefix and the padding window crosses that bound, and MTU is a
+	 * root-set value the driver must not panic on: drop instead.
+	 */
+	if (out_len + max_hdr > MAXMCLBYTES) {
+		AWGPRINTF(LOG_ERR, sc, NULL, "encap: %zu bytes exceeds the "
+		    "largest cluster (mtu %u, s4 %u); raise the limit or "
+		    "lower the mtu/s4\n", out_len + max_hdr,
+		    sc->sc_if.if_mtu, s4);
+		goto error;
+	}
 
 	/*
 	 * For the time being we allocate a new packet with sufficient size to
@@ -2691,6 +2716,7 @@ awg_index_drop(void *_sc, uint32_t key0)
 	uint32_t	 key = key0 & sc->sc_index_mask;
 
 	mtx_enter(&sc->sc_index_mtx);
+	iter = NULL;
 	LIST_FOREACH(iter, &sc->sc_index[key], i_entry)
 		if (iter->i_key == key0) {
 			LIST_REMOVE(iter, i_entry);
@@ -2698,9 +2724,16 @@ awg_index_drop(void *_sc, uint32_t key0)
 		}
 	mtx_leave(&sc->sc_index_mtx);
 
+	/*
+	 * The key may already be gone (a second free path for the same
+	 * keypair). A double drop must be a no-op, not a NULL dereference:
+	 * KASSERT() after the dereference cannot save the kernel here.
+	 */
+	if (iter == NULL)
+		return;
+
 	/* We expect a peer */
 	peer = CONTAINER_OF(iter->i_value, struct awg_peer, p_remote);
-	KASSERT(peer != NULL);
 	SLIST_INSERT_HEAD(&peer->p_unused_index, iter, i_unused_entry);
 }
 
@@ -3058,27 +3091,47 @@ awg_ioctl_check(struct awg_softc *sc, struct awg_interface_io *io)
 	for (i = 0; i < 4; i++)
 		if (s[i] > AWG_MAX_PADDING)
 			return EINVAL;
-	if (f & AWG_INTERFACE_HAS_JC && io->i_jc > AWG_MAX_JUNK)
-		return EINVAL;
-	/* Junk is built in a 1500-byte stack buffer; a larger Jmax makes the
-	 * driver send nothing at all, which is worse than refusing it. */
-	if (f & AWG_INTERFACE_HAS_JC && io->i_jmax > AWG_MAX_JUNK_SIZE)
-		return EINVAL;
+	if (f & AWG_INTERFACE_HAS_JC) {
+		if (io->i_jc > AWG_MAX_JUNK ||
+		    io->i_jmin > AWG_MAX_JUNK_SIZE ||
+		    io->i_jmax > AWG_MAX_JUNK_SIZE)
+			return EINVAL;
+		/* Junk is built in a 1500-byte stack buffer and
+		 * awg_send_junk() bails out on jmin == 0 or jmin > jmax, so
+		 * such a config silently emits no junk at all — exactly the
+		 * fingerprint divergence the Jmax bound exists to prevent.
+		 * Refuse it while junk is enabled. */
+		if (io->i_jc != 0 &&
+		    (io->i_jmin == 0 || io->i_jmin > io->i_jmax))
+			return EINVAL;
+	}
 	/*
 	 * A keychain that expires before the next handshake can complete
-	 * rekeys on every packet. Only check when both values arrive in the
-	 * same call, the way awg-quick sends them.
+	 * rekeys on every packet. REKEY_AFTER_TIME_RECV is
+	 * RejectAfterTime - (KeepaliveTimeout + RekeyTimeout), and both are
+	 * drawn from ranges, so the *lowest* reject value must stay above the
+	 * *lowest* margin. Merge with the stored values: ifconfig may set the
+	 * three fields in separate calls.
 	 */
-	if ((f & (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
-	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT)) ==
-	    (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
-	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT)) {
-		int window = io->i_keepalive_timeout.r_hi +
-		    ((f & AWG_INTERFACE_HAS_REKEY_TIMEOUT) ?
-		    io->i_rekey_timeout.r_hi : awg_rekey_timeout(sc));
-		if (!awg_range_is_zero(io->i_reject_after_time) &&
-		    io->i_reject_after_time.r_hi <= window)
-			return EINVAL;
+	if (f & (AWG_INTERFACE_HAS_REJECT_AFTER_TIME |
+	    AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT |
+	    AWG_INTERFACE_HAS_REKEY_TIMEOUT)) {
+		struct awg_range rj, ka, rt;
+		int margin;
+
+		rj = (f & AWG_INTERFACE_HAS_REJECT_AFTER_TIME) ?
+		    io->i_reject_after_time : sc->sc_awg_reject_after_time;
+		ka = (f & AWG_INTERFACE_HAS_KEEPALIVE_TIMEOUT) ?
+		    io->i_keepalive_timeout : sc->sc_awg_keepalive_timeout;
+		rt = (f & AWG_INTERFACE_HAS_REKEY_TIMEOUT) ?
+		    io->i_rekey_timeout : sc->sc_awg_rekey_timeout;
+		if (!awg_range_is_zero(rj)) {
+			margin = (awg_range_is_zero(ka) ? KEEPALIVE_TIMEOUT :
+			    ka.r_lo) + (awg_range_is_zero(rt) ? REKEY_TIMEOUT :
+			    rt.r_lo);
+			if (rj.r_lo <= margin)
+				return EINVAL;
+		}
 	}
 	if (f & AWG_INTERFACE_HAS_HPK) {
 		for (has_hpk = 0, i = 0; i < AWG_HPK_LEN; i++)
@@ -3319,8 +3372,20 @@ next_peer:
 	/* AmneziaWG obfuscation parameters, validated by awg_ioctl_check */
 	if (iface_o.i_flags & AWG_INTERFACE_HAS_VERSION &&
 	    iface_o.i_version != sc->sc_awg_version) {
-		if (iface_o.i_version == AWG_VERSION_LEGACY)
-			awg_reset_3_1(sc, ispec);
+		if (iface_o.i_version == AWG_VERSION_LEGACY) {
+			struct awg_ispec dropped[AWG_ISPEC_COUNT];
+
+			/*
+			 * awg_reset_3_1() moves the interface's current
+			 * I1-I5 into the array it is handed. That must not be
+			 * the freshly parsed ispec[]: it would free the new
+			 * values and hand the old ones back to the install
+			 * loop below, resurrecting them.
+			 */
+			awg_reset_3_1(sc, dropped);
+			for (i = 0; i < AWG_ISPEC_COUNT; i++)
+				awg_ispec_free(&dropped[i]);
+		}
 		sc->sc_awg_version = iface_o.i_version;
 	}
 	if (iface_o.i_flags & AWG_INTERFACE_HAS_JC) {

@@ -145,7 +145,7 @@
  #endif
  	trunk_status();
  	getifgroups();
-@@ -6056,6 +6152,669 @@
+@@ -6056,6 +6152,678 @@
  	free(wgdata.wgd_interface);
  }
  
@@ -154,12 +154,21 @@
 +
 +#define AWG_BASE64_KEY_LEN (4 * ((AWG_KEY_LEN + 2) / 3))
 +#define AWG_LOAD_KEY(dst, src, fn_name) do {				\
-+	uint8_t _tmp[AWG_KEY_LEN]; int _r;				\
-+	if (strlen(src) != AWG_BASE64_KEY_LEN)				\
++	uint8_t _tmp[AWG_KEY_LEN]; int _r; char _line[128] = "";	\
++	const char *_s = (src);						\
++	if (strcmp(_s, "-") == 0) {					\
++		if (fgets(_line, sizeof(_line), stdin) == NULL)		\
++			errx(1, fn_name " (key): no key on stdin");	\
++		_line[strcspn(_line, "\r\n")] = '\0';			\
++		_s = _line;							\
++	}								\
++	if (strlen(_s) != AWG_BASE64_KEY_LEN)				\
 +		errx(1, fn_name " (key): invalid length");		\
-+	if ((_r = b64_pton(src, _tmp, sizeof(_tmp))) != sizeof(_tmp))	\
++	if ((_r = b64_pton(_s, _tmp, sizeof(_tmp))) != sizeof(_tmp))	\
 +		errx(1, fn_name " (key): invalid base64 %d/%zu", _r, sizeof(_tmp)); \
 +	memcpy(dst, _tmp, AWG_KEY_LEN);					\
++	explicit_bzero(_tmp, sizeof(_tmp));				\
++	explicit_bzero(_line, sizeof(_line));				\
 +} while (0)
 +
 +struct awg_data_io	 awgdata = { 0 };

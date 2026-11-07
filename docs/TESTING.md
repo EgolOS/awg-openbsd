@@ -29,9 +29,10 @@ client for interoperability.
 
 ## Negative tests (must not panic)
 
-These are the tests that produced `panic: m_clget: request for 65807 byte
-cluster` before the bounds were added. They belong to `make check` once the
-build is scripted.
+`tools/lab/smoke-test.sh` runs this list inside the VM and prints PASS/FAIL per
+case, so it is the gate this matrix refers to: `doas sh tools/lab/smoke-test.sh`.
+These are the cases that produced `panic: m_clget: request for 65807 byte
+cluster` before the bounds were added.
 
 | Input | Expected |
 |---|---|

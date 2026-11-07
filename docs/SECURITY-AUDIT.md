@@ -29,10 +29,10 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 |---|---|---|---|---|---|
 | critical | 0 | 0 | 0 | 0 | 0 |
 | high | 4 | 0 | 1 | 1 | 6 |
-| medium | 6 | 2 | 1 | 0 | 9 |
+| medium | 7 | 2 | 1 | 0 | 10 |
 | low | 6 | 3 | 3 | 0 | 12 |
 | info | 1 | 1 | 1 | 0 | 3 |
-| **total** | **17** | **6** | **6** | **1** | **30** |
+| **total** | **18** | **6** | **6** | **1** | **31** |
 
 ## Register
 
@@ -404,6 +404,25 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 - Evidence: `dmesg` capture of the panic in the session log; `show panic` / `trace` at the `ddb>`
   prompt. `run-2/agents/a3-tests/PROPOSAL.md` proposed the concurrency/version-switch layer that
   found it.
+
+### AWG-031 — The kernel build's exit status is masked, so the installer can report success with no kernel
+- Severity: medium · State: fixed · Confidence: confirmed (reproduced on the guest)
+- Surface: local root install. Not remotely reachable; the cost is an operator who believes a
+  security rebuild happened when it did not.
+- Affected: every installer up to `7081e82`.
+- Root cause: `make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee -a "$LOGFILE"` reports **tee's** exit
+  status. A build that dies (out of disk, compiler error, a tree that does not match the release)
+  therefore looks successful, and under `set -e` the script continues to the install step.
+  Observed on the second lab VM: `INSTALL_OK seconds=455` was printed with no `bsd` anywhere in
+  the compile directory.
+- Evidence: `MAKEFLAGS=-bogus make ... | tee -a log; echo $?` prints `0`; the same command
+  without the pipe returns non-zero.
+- Remediation: the build logs to `$LOGFILE` and its status is checked with `if ! make ...`;
+  a failure prints the last 20 lines and stops. The artifact is additionally verified before
+  it can reach `/bsd` (ELF, size, `awg_encap` symbol — `--build-only`/`--kernel-only`).
+- Regression test: `verify_kernel_artifact()` runs on every `--build-only`/`--kernel-only`;
+  the failure branch was checked by hand with a bogus `MAKEFLAGS` (no automated case: forcing a
+  real compile failure would need a broken tree).
 
 ## Rejected claims
 

@@ -235,7 +235,14 @@ kernel_build() {
 
     log "Building kernel — this takes ~15 minutes"
     cd "$SRCDIR/arch/amd64/compile/AWG.MP"
-    make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee -a "$LOGFILE"
+    # Not `make | tee`: the pipeline reports tee's status, so a build that died
+    # half-way looks like a success and the installer carries on to install a
+    # kernel that was never produced. Log to the file, report on failure.
+    log "Building kernel — this takes ~15 minutes (log: $LOGFILE)"
+    if ! make -j"$(sysctl -n hw.ncpu)" >> "$LOGFILE" 2>&1; then
+        tail -20 "$LOGFILE" >&2
+        die "kernel build failed (full log: $LOGFILE)"
+    fi
 }
 
 # Refuse a compiled kernel that cannot be the AWG kernel: wrong file type, a

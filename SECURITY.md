@@ -41,10 +41,10 @@ What the driver does **not** protect against:
 | Peer-inflated UDP window | Padding up to 64 KB, one datagram per packet | **Fixed**: clamped to 1500 |
 | `I1`–`I5` were sent regardless of MTU | Fragmented signature packets | **Fixed**: packets above `if_mtu` are skipped |
 | `conf/files` attached shared crypto to `wg` only | `awg`-without-`wg` config links with undefined symbols | **Fixed**: entries are `wg \| awg` |
-| H1–H4 collisions in legacy mode are not rejected | A peer's response can be classified as an initiation | Open, matches the Linux module |
+| H1–H4 collisions in legacy mode are not rejected | A peer's response can be classified as an initiation | Accepted by design: classification is length-first, the handshake structs differ in size, and the Linux module behaves the same — `docs/LOCKING.md` §5 |
 | `Jmax` above 1500 was silently ignored | The driver sent no junk packets at all, so the fingerprint differed from the Linux peers | **Fixed**: rejected with `EINVAL` |
 | Timings were not cross-checked | `RejectAfterTime` ≤ keepalive + rekey made every packet rekey | **Fixed**: rejected when both arrive in one call |
-| Obfuscation fields are read without a lock | A reconfiguration can drop packets mid-update | Open, documented in the source |
+| Obfuscation fields are read without a lock | A reconfiguration can drop packets mid-update; no memory-safety consequence | Accepted, analysed in `docs/LOCKING.md` §2-§3; change parameters with the interface down |
 | A jumbo MTU plus `S4` plus the padding window could exceed `MAXMCLBYTES` | `panic: m_clget` on transmit (and a NULL pool without DIAGNOSTIC) | **Fixed**: `awg_encap()` drops the packet instead |
 | `awg-quick` put the private key on the `ifconfig` command line | Key readable via `ps(1)`, in core dumps and in stderr logs | **Fixed**: `awgkey -` reads it from stdin; `cmd()` redacts key arguments |
 | Numeric config values reached a shell arithmetic context | `S1 = x[$(cmd)]` executed as root while parsing the config | **Fixed**: every numeric field is validated before use |

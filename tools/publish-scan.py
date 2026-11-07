@@ -25,7 +25,7 @@ PATTERNS = [
 # Lines that look like the pattern but are declarations, docs, or examples.
 ALLOW = re.compile(
     r"(AWG_MAX_|MAXMCLBYTES|placeholder|<server-key>|<peer-key>|example\.(com|org)"
-    r"|10\.0\.0\.|10\.8\.0\.|10\.8\.9\.|10\.9\.0\.|10\.9\.9\.|10\.0\.2\.|127\.0\.0\.1|0\.0\.0\.0"
+    r"|10\.0\.0\.|10\.8\.0\.|10\.8\.9\.|10\.9\.0\.|10\.9\.9\.|10\.0\.2\.|10\.66\.0\.|192\.168\.99\.|127\.0\.0\.1|0\.0\.0\.0"
     r"|255\.255\.255|YourPublicKey|PUBKEY|/home/build"
     # upstream copyright headers and the WireGuard protocol string
     r"|Copyright \(C\)|zx2c4\.com|noconroy|SPDX-License-Identifier"

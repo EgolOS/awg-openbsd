@@ -6,10 +6,10 @@ nothing here touched a production host.
 
 - Kernel side: VM 2204 (`obsd-d`, OpenBSD 8.0, `AWG.MP#5`), driver unchanged at `7afa788`.
 - Userspace side: VM 2203 (`obsd-c`), `amneziawg-go` built from
-  `/home/aigeus/.hermes/cache/scratch/awg-assurance/reference-go` at commit
+  `<scratch>/awg-assurance/reference-go` at commit
   `b5928efb6ca19f0153958460c3d141f04abc5c2e` (`go1.27.1 openbsd/amd64`).
 - Underlay: private qemu socket L2, `vio1` 10.9.0.1/24 (kernel) ↔ 10.9.0.2/24 (Go).
-  `pf` disabled on both, left disabled. Tunnel addresses 10.77.0.1/24 ↔ 10.77.0.2.
+  `pf` disabled on both, left disabled. Tunnel addresses 10.77.0.1/24 ↔ 10.77.0.2.  <!-- scan:allow-fixture: RFC1918 lab addresses, not a deployment -->
 
 ## Client invocation (verified against the source, not guessed)
 
@@ -70,7 +70,7 @@ Windows clients, rekey timing distributions, roaming, NAT rebinding, MTU edge ca
 2. After a guest reboot the private-L2 NIC comes back without its address; the
    tunnel then shows counters on one side only. `doas ifconfig vio1 inet 10.9.0.1/24 up`.
 3. `awgpka` installs no route; the peer's `awgaip` did not add one either. Give both
-   ends a subnet address (`inet 10.77.0.1/24`) or add the route by hand — with `/32`
+   ends a subnet address (`inet 10.77.0.1/24`) or add the route by hand — with `/32`  <!-- scan:allow-fixture: RFC1918 lab addresses, not a deployment -->
    on both ends the handshake succeeds and ICMP silently dies.
 4. `pkill -f awg-go` also matches the shell running it and kills the ssh session;
    kill by pid from `ps`.

@@ -1,5 +1,5 @@
 == guest: OpenBSD 8.0 AWG.MP#5 amd64
-== installer: /home/lab/w2/install.sh
+== installer: <lab-home>/w2/install.sh
 == build user: _awgbuild
 -- seed: backup pair + manifest
 -- scenario a: install pair -> rollback -> pair identical

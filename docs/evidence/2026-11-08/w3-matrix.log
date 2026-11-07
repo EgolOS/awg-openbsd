@@ -50,13 +50,13 @@ FAIL: public keys not readable (D='' C='')
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 8 priority 0 llprio 3
 	awgport 51830
-	awgpubkey CpATx1W0liTy54vx6CtvFl0MRUAHsYGI1bhPIxnEunY=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: CpATx1W0liTy54vx6CtvFl0MRUAHsYGI1bhPIxnEunY=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go (device section)
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
@@ -68,19 +68,19 @@ awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 -- C pubkey:
-FAIL: public keys not readable (D='CpATx1W0liTy54vx6CtvFl0MRUAHsYGI1bhPIxnEunY=' C='')
+FAIL: public keys not readable (D='<key>' C='')
 ===== profile=legacy initiator=D 2026-11-07T21:37:42Z =====
 -- D: ifconfig awg0 create + profile + generated key
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 9 priority 0 llprio 3
 	awgport 51830
-	awgpubkey yTgJUdNYztbP4O5iDMz7XUqiH6+mB0dx+1swnDScHBA=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: yTgJUdNYztbP4O5iDMz7XUqiH6+mB0dx+1swnDScHBA=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go (device section)
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
@@ -92,19 +92,19 @@ awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 -- C pubkey:
-FAIL: public keys not readable (D='yTgJUdNYztbP4O5iDMz7XUqiH6+mB0dx+1swnDScHBA=' C='')
+FAIL: public keys not readable (D='<key>' C='')
 ===== profile=legacy initiator=D 2026-11-07T21:39:21Z =====
 -- D: ifconfig awg0 create + profile + generated key
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 10 priority 0 llprio 3
 	awgport 51830
-	awgpubkey RQI5nWAKidWJ6Co3ADJk8iG5w5x/BReR7Cc2J+SapAY=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: RQI5nWAKidWJ6Co3ADJk8iG5w5x/BReR7Cc2J+SapAY=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go (device section)
 ┌──────────────────────────────────────────────────────────────┐
 │                                                              │
@@ -116,19 +116,19 @@ awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 -- C pubkey:
-FAIL: public keys not readable (D='RQI5nWAKidWJ6Co3ADJk8iG5w5x/BReR7Cc2J+SapAY=' C='')
+FAIL: public keys not readable (D='<key>' C='')
 ===== profile=legacy initiator=D 2026-11-07T21:41:34Z =====
 -- D: ifconfig awg0 create + profile + generated key
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 11 priority 0 llprio 3
 	awgport 51830
-	awgpubkey 6UdIqRWLepRiw+nDZ2ssKkFgBBIijieQV1Tq2+9iXAI=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: 6UdIqRWLepRiw+nDZ2ssKkFgBBIijieQV1Tq2+9iXAI=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go tun0 (device + peer, keepalive on D)
 -- C pubkey (kernel view):
 -- D: add peer (keepalive on D)
@@ -139,13 +139,13 @@ ifconfig: awgpeer (key): invalid length
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 12 priority 0 llprio 3
 	awgport 51830
-	awgpubkey PvC2dE8Obe8YNPPufYOScAg+DGYPzXboBbCAetEK8To=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: PvC2dE8Obe8YNPPufYOScAg+DGYPzXboBbCAetEK8To=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go tun0 (device + peer, keepalive on D)
 -- D: add peer (keepalive on D)
 -- C pubkey (kernel view):
@@ -155,13 +155,13 @@ awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 13 priority 0 llprio 3
 	awgport 51830
-	awgpubkey NnpLbePtSHgFzerpsfcAKnZCM9OlfHBUP0uMfJIrVz8=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0
 	awgh1 1 awgh2 2 awgh3 3 awgh4 4
 	groups: awg
--- D pubkey: NnpLbePtSHgFzerpsfcAKnZCM9OlfHBUP0uMfJIrVz8=
+-- D pubkey: <key>
 -- C: ifconfig tun0 create + awg-go tun0 (device + peer, keepalive on D)
 -- D: add peer (keepalive on D)
 -- C pubkey (kernel view):
@@ -172,7 +172,7 @@ FAIL: handshake never completed
 awg0: flags=8082<BROADCAST,NOARP,MULTICAST> mtu 1420
 	index 13 priority 0 llprio 3
 	awgport 51830
-	awgpubkey NnpLbePtSHgFzerpsfcAKnZCM9OlfHBUP0uMfJIrVz8=
+	awgpubkey <key>
 	awgversion legacy
 	awgjc 0 awgjmin 0 awgjmax 0
 	awgs1 0 awgs2 0

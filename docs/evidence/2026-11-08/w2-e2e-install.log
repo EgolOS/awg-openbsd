@@ -5,7 +5,7 @@ cd /home/build/sys/arch/amd64/compile/AWG.MP/obj && config -s /home/build/sys -b
 ==> Staging kernel to /bsd.awg-staging
 ==> Recorded the installed pair in /var/db/awg-install/manifest
 ==> Kernel installed to /bsd — reboot to activate
-==> If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh /home/lab/w3/install.sh --rollback
+==> If it does not boot: at the boot prompt, 'boot /bsd.awg-prev'; after boot, sh <lab-home>/w3/install.sh --rollback
 
 ==========================================
  AmneziaWG install complete

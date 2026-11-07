@@ -44,8 +44,8 @@ sys/src with the same digests; all nine task steps completed on the live VM.
 ## For the maintainer
 Reproduce (VM 2201, keys in awg-lab):
 ```sh
-K=/home/aigeus/.hermes/cache/scratch/awg-lab/lab_ed25519
-KH=/home/aigeus/.hermes/cache/scratch/awg-assurance/known_hosts
+K=<scratch>/awg-lab/lab_ed25519
+KH=<scratch>/awg-assurance/known_hosts
 SSH="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KH -o ConnectTimeout=10 -i $K"
 SCP="scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KH -i $K"
 # 2: doas sh -s (ftp sys/src/SHA256.sig; signify; sha256)
@@ -57,7 +57,7 @@ SCP="scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KH
 # 6: install -F -m 700 obj/bsd /bsd; doas reboot
 # 7: AWG_LAB_DISPOSABLE=1 make check-vm LAB_KNOWN_HOSTS=$KH SSH="$SSH -p 2201" SCP="$SCP -P 2201"
 # 8: doas sh -s < evidence/w1/08-churn.sh
-# 9: cc -Wall -Wextra -I/home/lab abi-probe.c -o abi-probe; ifconfig awg9 create; ./abi-probe awg9
+# 9: cc -Wall -Wextra -I<lab-home> abi-probe.c -o abi-probe; ifconfig awg9 create; ./abi-probe awg9
 ```
 Risks/observations from reading the driver + recipe:
 1. conf/files patch awk (install.sh / task recipe): multi-line awk condition → every line gets

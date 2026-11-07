@@ -5,6 +5,7 @@
 #
 # Based on wg-quick/openbsd.bash from amneziawg-tools.
 
+set +x
 set -e -o pipefail
 shopt -s extglob
 export LC_ALL=C
@@ -58,8 +59,8 @@ GATEWAY4=""
 GATEWAY6=""
 
 cmd() {
-	# Key material is passed to ifconfig as an argument (awgkey/awgpsk/
-	# awghpk). Never echo those values: stderr ends up in logs, cron mail
+	# Redact even callers of the manual argv interface. Automated secret-key
+	# loading below uses stdin; stderr ends up in logs, cron mail
 	# and rc.local output.
 	local shown=( ) a redact=0
 	for a in "$@"; do
@@ -361,11 +362,11 @@ up_if() {
 set_config() {
 	local -
 	set -f
-	local args=()
+	local args=() keys=( "$PRIVATE_KEY" )
 
 	[[ -n $PRIVATE_KEY ]] || die "no PrivateKey"
 	args+=( awgversion "$VERSION" )
-	# The private key is fed on stdin (`awgkey -`): the argument vector of a
+	# All secret keys are fed on stdin in argv order: the argument vector of a
 	# root process is readable with ps(1) and lands in core dumps.
 	args+=( awgkey - )
 	[[ -n $LISTEN_PORT ]] && args+=( awgport "$LISTEN_PORT" )
@@ -388,7 +389,7 @@ set_config() {
 	for (( n=0; n<5; n++ )); do
 		[[ -n ${ISPECS[$n]} ]] && args+=( "awgi$(( n + 1 ))" "${ISPECS[$n]}" )
 	done
-	[[ -n $HPK ]] && args+=( awghpk "$HPK" )
+	if [[ -n $HPK ]]; then args+=( awghpk - ); keys+=( "$HPK" ); fi
 	[[ -n $CPA ]] && args+=( awgcpa "$CPA" )
 	[[ -n $REKEY_AFTER_TIME ]] && args+=( awgrekeyaftertime "$REKEY_AFTER_TIME" )
 	[[ -n $REKEY_TIMEOUT ]] && args+=( awgrekeytimeout "$REKEY_TIMEOUT" )
@@ -408,7 +409,9 @@ set_config() {
 	local i
 	for (( i=0; i<PEER_COUNT; i++ )); do
 		args+=( awgpeer "${PEER_PUBKEYS[$i]}" )
-		[[ -n ${PEER_PSKS[$i]} ]]      && args+=( awgpsk      "${PEER_PSKS[$i]}" )
+		if [[ -n ${PEER_PSKS[$i]} ]]; then
+			args+=( awgpsk - ); keys+=( "${PEER_PSKS[$i]}" )
+		fi
 		[[ -n ${PEER_PKAS[$i]} ]]      && args+=( awgpka      "${PEER_PKAS[$i]}" )
 		if [[ -n ${PEER_ENDPOINTS[$i]} ]]; then
 			local ep="${PEER_ENDPOINTS[$i]}"
@@ -425,7 +428,7 @@ set_config() {
 		done
 	done
 
-	printf '%s\n' "$PRIVATE_KEY" | cmd ifconfig "$REAL_INTERFACE" "${args[@]}"
+	printf '%s\n' "${keys[@]}" | cmd ifconfig "$REAL_INTERFACE" "${args[@]}"
 }
 
 add_addr() {

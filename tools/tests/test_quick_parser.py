@@ -48,6 +48,20 @@ parse_options "$1"
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn('PARSED', r.stdout)
 
+    def test_all_secret_keys_use_stdin_in_argument_order(self):
+        r = self.run_parser('[Interface]\nPrivateKey = dummy\n', '''
+PRIVATE_KEY=private-fixture; HPK=header-fixture; PEER_COUNT=1
+PEER_PUBKEYS=(public-fixture); PEER_PSKS=(psk-fixture)
+REAL_INTERFACE=awg9
+ifconfig() { printf 'ARG:%s\\n' "$@"; while IFS= read -r key; do printf 'STDIN:%s\\n' "$key"; done; }
+set_config
+''')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        arguments = [line for line in r.stdout.splitlines() if line.startswith('ARG:')]
+        self.assertNotIn('fixture', '\n'.join(line for line in arguments if 'public-fixture' not in line))
+        self.assertEqual([line for line in r.stdout.splitlines() if line.startswith('STDIN:')],
+                         ['STDIN:private-fixture', 'STDIN:header-fixture', 'STDIN:psk-fixture'])
+
     def test_decimal_leading_zero_range(self):
         r = self.run_parser('[Interface]\nPrivateKey = dummy\nH1 = 08-09\n', 'echo PARSED\n')
         self.assertEqual(r.returncode, 0, r.stderr)

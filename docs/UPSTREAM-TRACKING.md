@@ -26,8 +26,8 @@ describes a different upstream and must not be used for the merge.
 Verify the tarball the way OpenBSD does, not with HTTPS alone:
 
 ```sh
-fetch https://cdn.openbsd.org/pub/OpenBSD/8.0/SHA256.sig
-sha256 -C SHA256.sig sys.tar.gz      # prints "Signature Verified"
+ftp -o SHA256.sig https://cdn.openbsd.org/pub/OpenBSD/8.0/SHA256.sig
+signify -C -p /etc/signify/openbsd-80-base.pub -x SHA256.sig sys.tar.gz
 ```
 
 `install.sh` performs the same check before it copies anything into `/usr/src`
@@ -142,7 +142,7 @@ State only what has been built and tested:
 
 | Release | Kernel built | Runtime tested |
 | --- | --- | --- |
-| 8.0 amd64 | yes (`AWG.MP#4`, lab VM) | yes — `make check-vm` |
+| 8.0 amd64 | historical AWG.MP#5; clean rebuild NOT RUN this pass | existing #5 re-tested with four VM gates and two-VM integrity test |
 | 7.9 amd64 | compiles (`-Werror` clean, per project history) | no |
 
 `-current` is not tracked automatically. It is worth a compile per release

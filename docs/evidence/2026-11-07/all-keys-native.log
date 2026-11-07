@@ -1,0 +1,1 @@
+PASS: native awg-quick production set_config accepts private/HPK/PSK stdin order; bash -x logs contain none of those keys # scan:allow-fixture

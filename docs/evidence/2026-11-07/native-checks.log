@@ -1,0 +1,43 @@
+PASS: actual doas wheel policy refuses user-owned 0600 config # scan:allow-fixture
+PASS: root-owned config in trusted ancestors accepted # scan:allow-fixture
+PASS: root-owned file under user-controlled ancestor refused # scan:allow-fixture
+PASS: canonical symlink target ownership checked # scan:allow-fixture
+PASS: real OpenBSD source matches signed archive baseline # scan:allow-fixture
+PASS: stale ifconfig source rejected before build # scan:allow-fixture
+Hmm...  Looks like a unified diff to me...
+The text leading up to this was:
+--------------------------
+|--- /usr/src/sbin/ifconfig/ifconfig.c.orig	Tue Oct 20 09:21:48 2026
+|+++ /usr/src/sbin/ifconfig/ifconfig.c	Tue Oct 20 09:21:48 2026
+--------------------------
+Patching file sbin/ifconfig/ifconfig.c using Plan A...
+Hunk #1 succeeded at 82.
+Hunk #2 succeeded at 366.
+Hunk #3 succeeded at 440.
+Hunk #4 succeeded at 704.
+Hunk #5 succeeded at 822.
+Hunk #6 succeeded at 1073.
+Hunk #7 succeeded at 3504.
+Hunk #8 succeeded at 6152.
+done
+Hmm...  Looks like a unified diff to me...
+The text leading up to this was:
+--------------------------
+|--- /usr/src/sbin/ifconfig/ifconfig.c.orig	Tue Oct 20 09:21:48 2026
+|+++ /usr/src/sbin/ifconfig/ifconfig.c	Tue Oct 20 09:21:48 2026
+--------------------------
+Patching file sbin/ifconfig/ifconfig.c using Plan A...
+Hunk #1 succeeded at 82.
+Hunk #2 succeeded at 366.
+Hunk #3 succeeded at 440.
+Hunk #4 succeeded at 704.
+Hunk #5 succeeded at 822.
+Hunk #6 succeeded at 1073.
+Hunk #7 succeeded at 3504.
+Hunk #8 succeeded at 6152.
+done
+PASS: patched ifconfig builds unprivileged from verified 8.0 sources # scan:allow-fixture
+Signature Verified
+sys.tar.gz: OK
+PASS: native signify accepts valid fixture # scan:allow-fixture
+PASS: native signify rejects corrupt fixture # scan:allow-fixture

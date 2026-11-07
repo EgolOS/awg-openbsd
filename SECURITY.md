@@ -32,6 +32,13 @@ What the driver does **not** protect against:
 - **Traffic analysis.** Obfuscation changes the wire format, not the timing
   or volume of traffic.
 
+## Current release blockers
+
+AWG-014 (privileged builds from writable trees) and AWG-029 (ifconfig backup and
+paired rollback) remain unresolved. New local fixes and executed evidence are in
+`docs/ENGINEERING-REPORT.md`; no production deployment/release is authorized by
+passing a host check. GitHub CI uses hosted checks only, not a privileged runner.
+
 ## Known limitations
 
 | Limitation | Impact | State |
@@ -43,7 +50,7 @@ What the driver does **not** protect against:
 | `conf/files` attached shared crypto to `wg` only | `awg`-without-`wg` config links with undefined symbols | **Fixed**: entries are `wg \| awg` |
 | H1–H4 collisions in legacy mode are not rejected | A peer's response can be classified as an initiation | Accepted by design: classification is length-first, the handshake structs differ in size, and the Linux module behaves the same — `docs/LOCKING.md` §5 |
 | `Jmax` above 1500 was silently ignored | The driver sent no junk packets at all, so the fingerprint differed from the Linux peers | **Fixed**: rejected with `EINVAL` |
-| Timings were not cross-checked | `RejectAfterTime` ≤ keepalive + rekey made every packet rekey | **Fixed**: rejected when both arrive in one call |
+| Timings were not cross-checked | `RejectAfterTime` ≤ keepalive + rekey made every packet rekey | **Fixed**: merged-state lower bounds checked across separate calls |
 | Obfuscation fields are read without a lock | A reconfiguration can drop packets mid-update; no memory-safety consequence | Accepted, analysed in `docs/LOCKING.md` §2-§3; change parameters with the interface down |
 | A jumbo MTU plus `S4` plus the padding window could exceed `MAXMCLBYTES` | `panic: m_clget` on transmit (and a NULL pool without DIAGNOSTIC) | **Fixed**: `awg_encap()` drops the packet instead |
 | `awg-quick` put the private key on the `ifconfig` command line | Key readable via `ps(1)`, in core dumps and in stderr logs | **Fixed**: `awgkey -` reads it from stdin; `cmd()` redacts key arguments |
@@ -59,7 +66,9 @@ What the driver does **not** protect against:
 `awg-quick` executes `PreUp`/`PostUp`/`PreDown`/`PostDown` hooks with `eval` as
 root, which is the documented `wg-quick` behaviour. Combined with the fact that
 config content usually arrives from a VPN provider, this means: **a config file
-is a root program.** Only copy configs you trust; the private-key, arithmetic
+is a root program.** Files and all canonical ancestors now require root ownership
+and no group/other write permission; this is not content sandboxing. Only copy
+configs you trust; the private-key, arithmetic
 and permission fixes above close the accidental paths, not the deliberate one.
 
 ## Hardening checklist for deployments

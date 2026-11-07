@@ -1,0 +1,3 @@
+<lab-work>/sbin/ifconfig/ifconfig: ELF 64-bit LSB shared object, x86-64, version 1
+SHA256 (<lab-work>/sbin/ifconfig/ifconfig) = 50885675f643895cab83d449ccfed3de7663723bba68bbd597b6dc6b85fcd2fa
+PASS: newly compiled ifconfig create/set/get/rejected bound/destroy against existing AWG.MP#5 # scan:allow-fixture

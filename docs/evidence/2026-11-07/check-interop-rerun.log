@@ -1,0 +1,10 @@
+== 1. configure both ends
+PASS: public keys read back # scan:allow-fixture
+PASS: both ends configured (3.1, junk, S1-S4) # scan:allow-fixture
+== 2. handshake across the LAN
+PASS: handshake on A # scan:allow-fixture
+PASS: handshake on B # scan:allow-fixture
+== 3. ICMP through the tunnel
+PASS: 3 pings through the tunnel # scan:allow-fixture
+== 4. bulk transfer through the tunnel
+make: *** [Makefile:78: check-interop] Error 1

@@ -23,16 +23,26 @@ coverage of those four.
 
 Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name a repo file.
 
+## Current revalidation (local series, 2026-11-07)
+
+Starting HEAD `2d71d8cefce55680fba4535a13c88aadbb00bf53`; details and exact gates in
+`docs/ENGINEERING-REPORT.md`. New fixes are **local commits, not deployed/pushed**.
+The historical audit below is retained; its line numbers and “not covered” list
+are not current coverage claims. AWG-014 and AWG-029 remain explicit release
+blockers, not agent-waived risks. Existing AWG.MP#5 VM gates were re-executed;
+no new kernel build/boot, official-client interop, full recovery rehearsal, long
+soak, coverage-guided fuzzing or performance result is claimed.
+
 ## Summary
 
 | Severity | fixed | open | accepted | rejected | total |
 |---|---|---|---|---|---|
 | critical | 0 | 0 | 0 | 0 | 0 |
-| high | 4 | 0 | 1 | 1 | 6 |
-| medium | 7 | 2 | 1 | 0 | 10 |
-| low | 6 | 3 | 3 | 0 | 12 |
+| high | 5 | 0 | 1 | 1 | 7 |
+| medium | 9 | 1 | 1 | 0 | 11 |
+| low | 11 | 0 | 3 | 0 | 14 |
 | info | 1 | 1 | 1 | 0 | 3 |
-| **total** | **18** | **6** | **6** | **1** | **31** |
+| **total** | **26** | **2** | **6** | **1** | **35** |
 
 ## Register
 
@@ -97,6 +107,12 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 - Regression test: `awg0 key from stdin (awgkey -)` (`smoke-test.sh` §1); the redaction in the
   `awg-quick` log is manual.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C3), `run-1/REPORT.md`
+- Current revalidation (`6ec75cf` plus follow-up `be08d4a` secret queue): private-key stdin was
+  already fixed, but PSK/HPK still appeared in `set_config()` argv at the starting HEAD.
+  All three now use `AWG_LOAD_KEY` stdin in argument order; shell xtrace is disabled
+  before reading configuration. `test_all_secret_keys_use_stdin_in_argument_order`
+  and native `all-keys-native.log` pass. Manual ifconfig argv forms still exist;
+  root tracing/core/ktrace and deliberately secret-bearing hooks remain out of scope.
 
 ### AWG-006 — Kernel and userland sources built from unverified downloads
 - Severity: high · State: fixed · Confidence: confirmed
@@ -186,15 +202,24 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C8, F-C9), `run-1/REPORT.md`
 
 ### AWG-013 — Arbitrary config path accepted, then loaded as root through `doas`
-- Severity: medium · State: open · Confidence: needs-validation (depends on `doas.conf`)
+- Severity: medium · State: fixed · Confidence: confirmed in disposable OpenBSD lab
 - Surface: local unprivileged user (when `doas` permits `awg-quick` without argument restrictions)
 - Affected: all commits through `f43535e`
 - Root cause: `sbin/awg-quick:75-82` rewrites only bare names into `/etc/amnezia/amneziawg/`; any
   other argument is used as-is provided it ends in `NAME.conf`, and `auto_su` (`:568`) re-execs
   with the original `ARGS`, so the path survives the privilege transition.
-- Remediation: not fixed — restrict to `/etc/amnezia/amneziawg/*.conf` after `readlink -f`.
+- Original proposed remediation (superseded below): restrict to `/etc/amnezia/amneziawg/*.conf` after `readlink -f`.
 - Regression test: no automated test.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C10), `run-1/REPORT.md`
+- Current revalidation: fixed locally in `6ec75cf`. `trusted_config_path()` checks
+  the canonical regular file and every ancestor for UID 0 and no group/other write
+  before parsing; 0600/0400 file-mode checks remain. Arbitrary **trusted root-owned**
+  paths are preserved, not globally banned. Native OpenBSD tests used the actual
+  `permit nopass :wheel` lab policy: user-owned 0600, root file under a user-owned
+  parent, and symlink to an untrusted target were refused; root-private config passed.
+  Evidence: `docs/evidence/2026-11-07/native-checks.log`, `test_quick_parser.py`.
+  Residual: hooks are intentional root programs; no claim that untrusted provider
+  content becomes safe. Narrow doas policy matrices have not all been rehearsed.
 
 ### AWG-014 — Build and install run as root inside a group-writable source tree
 - Severity: medium · State: open · Confidence: needs-validation (deployment fact: `wsrc` membership)
@@ -307,16 +332,24 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 - Evidence: `run-1/agents/h1b-datapath/findings.md` (F-A5), `run-1/REPORT.md`
 
 ### AWG-023 — `install.sh` reuses `ifconfig` sources from another release
-- Severity: low · State: open · Confidence: confirmed
+- Severity: low · State: fixed · Confidence: confirmed
 - Surface: local root (installer), a stale `/usr/src/sbin/ifconfig` left by `sysupgrade`
 - Affected: all commits through `f43535e`
 - Root cause: `install.sh:60-64` checks `conf/newvers.sh` for `$SRCDIR` (sys) only; `:76-86`
   reuses `/usr/src/sbin/ifconfig` on the strength of `[ -f ifconfig.c ]`, so an old release's
   `ifconfig.c` is patched (with offsets) and built against new headers — contrary to `README.md`.
-- Remediation: not fixed — apply the same `newvers`/`$OpenBSD:` ident check and `patch --dry-run`.
+- Original proposed remediation (superseded below): apply the same `newvers`/`$OpenBSD:` ident check and `patch --dry-run`.
   Related: `--tools-only` no longer downloads the kernel tree.
 - Regression test: no automated test.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C12), `run-1/REPORT.md`
+- Current revalidation: fixed locally in `7cc433b`. `verify_ifconfig_source()` hashes
+  pristine `ifconfig.c` (or its retained original) against the release manifest;
+  staging applies the current patch with `patch -C -F 0` then `patch -F 0`, and an
+  existing patched file must match exactly. Mixed kernel release is fatal, not a
+  warning. Native stale-file rejection and unprivileged patched-ifconfig compilation
+  passed; unit tests cover pristine/patched/stale identities. Manifest corrected
+  against signed 8.0 archives (AWG-035). This does not fix writable-tree races AWG-014,
+  full installer transaction safety, or establish ABI support for another release.
 
 ### AWG-024 — `sync-check.py` exits 0 when upstream added or removed functions
 - Severity: low · State: fixed · Confidence: confirmed
@@ -330,26 +363,42 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C13), `run-1/REPORT.md`
 
 ### AWG-025 — Glob/split expansion of `Address`, `DNS` and `AllowedIPs`
-- Severity: low · State: open · Confidence: confirmed
+- Severity: low · State: fixed · Confidence: confirmed
 - Surface: local root config
 - Affected: all commits through `f43535e`
 - Root cause: `sbin/awg-quick:112,114-116,158,323,585,587` expand `${value//,/ }` unquoted, so an
   address/AIP of `*` becomes a directory listing of the directory root ran the script from.
-- Remediation: not fixed — use `IFS=, read -r -a` and quote every use (`set -f` around the parser).
+- Original proposed remediation (superseded below): use `IFS=, read -r -a` and quote every use (`set -f` around the parser).
 - Regression test: no automated test.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C14), `run-1/REPORT.md`
+- Current revalidation: fixed locally in `6ec75cf`. Bash `local -; set -f` scopes
+  pathname-expansion suppression to parsing and ifconfig argv construction; route
+  enumeration uses `read -r -a` and quoted arrays. Hook glob semantics are preserved.
+  `test_lists_do_not_expand_filenames` passes with wildcard Address/AllowedIPs and
+  a populated cwd. Intentional whitespace/comma list separators remain supported;
+  invalid literal network values are left for native ifconfig/route validation.
 
 ### AWG-026 — `gen-config.sh` prints private keys to stdout by default
-- Severity: low · State: open · Confidence: confirmed
+- Severity: low · State: fixed · Confidence: confirmed
 - Surface: local operator (terminal scrollback, `script(1)` logs, screen shares)
 - Affected: all commits through `f43535e`
 - Root cause: `tools/gen-config.sh:33,37-48,50-91` emit two private keys and the PSK on stdout and
   pass the server key through `ifconfig awg9 awgkey "$SPRIV"` argv; the script sets no umask and
   creates no file, so the `umask 077` redirect is documented only in its own header.
-- Remediation: not fixed — default to a `umask 077` / `install -m 600` pair file, `--stdout` for
+- Original proposed remediation (superseded below): default to a `umask 077` / `install -m 600` pair file, `--stdout` for
   the current behaviour.
 - Regression test: no automated test.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C15), `run-1/REPORT.md`
+- Current revalidation: fixed locally in `81e1bb8`. Default `pair.conf` is created
+  exclusively with umask 077, mode 0600; `--output` selects a new file and `--stdout`
+  explicitly exports plaintext. Private keys go through `awgkey -`; tracing is off
+  before generation. Failed generation removes its incomplete output and its own
+  helper interface; pre-existing awg9 is never modified. Endpoint/CIDR checks reject
+  config injection, IPv6 endpoints retain brackets, H values are distinct with a
+  bounded collision retry. Generation still uses OpenSSL and /dev/random CSPRNGs.
+  Unit contract tests and native OpenBSD `sh -x` generation passed. The small legacy
+  generator intentionally supports IPv4 tunnel addresses, with IPv4/IPv6 endpoints.
+  Evidence: `docs/evidence/2026-11-07/generator-native.log`, `test_gen_config.py`.
 
 ### AWG-027 — `awg_send_hs` trailer arithmetic is overflow-free; `MCLGETL` failure handled
 - Severity: info · State: accepted · Confidence: confirmed
@@ -424,6 +473,61 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
   the failure branch was checked by hand with a bogus `MAKEFLAGS` (no automated case: forcing a
   real compile failure would need a broken tree).
 
+### AWG-032 — Untrusted PR workflow can reach a persistent privileged runner
+- Severity: high · State: fixed · Surface: supply chain, external PR author if a
+  self-hosted runner is registered and OPENBSD_RUNNER enabled.
+- Evidence at `2d71d8c`: `.github/workflows/ci.yml` pull_request + kernel job gated
+  only by a variable, root-required installer. Read-only GITHUB_TOKEN does not
+  contain arbitrary code execution on the runner or protect its persistent state.
+- Fix: `7cc433b` removes the self-hosted job, not merely its PR condition; PRs run
+  hosted checks with read-only contents and checkout credentials not persisted.
+- Validation: `test_ci_never_schedules_persistent_self_hosted_runner`; GitHub API
+  observed zero repository runners and read-only default workflow permissions.
+- Residual: local patch not pushed in this session. Do not register a privileged
+  runner without out-of-workflow branch/runner-group isolation and disposable VMs;
+  a PR can edit its own workflow condition. No production runner is authorized.
+
+### AWG-033 — Broken CI signify output plumbing and masked verifier status
+- Severity: low · State: fixed · Surface: release/operational verification gate.
+- Evidence at `2d71d8c`: ci.yml ran signify then a grep with no input; install.sh
+  masked signify status with `|| true` and parsed human-readable aggregate output.
+  This is a gate-integrity finding, not a demonstrated signature bypass.
+- Fix: `7cc433b`, shared `tools/verify-release.sh`: select exactly one named source
+  archive, use stock trusted release key, propagate signify exit status directly.
+  Removed CI kernel step is not represented as a successful kernel build.
+- Validation: real generated signify signatures: valid selected archive passes
+  even with absent unrelated manifest entries; bad/missing signature, wrong key
+  and modified archive fail. Native OpenBSD valid/corrupt fixture also exercised.
+- Residual: existing source directories are a separate trust boundary (AWG-014).
+
+### AWG-034 — Interop transfer PASS without successful delivery
+- Severity: medium · State: fixed · Surface: operational release/test evidence.
+- Evidence at `2d71d8c`: interop-test.sh ignored sender status and discarded receiver
+  bytes, reporting PASS from elapsed seconds. Native OpenBSD rejects its `nc -l -p`
+  listener syntax; parent reproduced sender failure before correcting the listener.
+- Fix: `7a25f68`: require sender success, exactly 8388608 receiver bytes and the
+  known SHA256 of the non-secret zero fixture. Use native nc listen syntax and
+  track its actual PID, not pkill -f. Opt-in disposable-lab guard, refuse existing
+  awg0, leave PF unchanged, pinned known_hosts default.
+- Validation: sender failure and receiver corruption regressions; corrected
+  two-VM run passed handshake, ICMP, bytes+digest and counters. Earlier failed and
+  timed-out attempts are retained; no throughput inference from this test.
+- Residual: trusted A_SSH/B_SSH overrides are shell commands. Fixed-port readiness,
+  abrupt SSH loss and all path/metacharacter overrides need broader lab tests.
+
+### AWG-035 — Incorrect userland baseline digest and manifest path resolution
+- Severity: low · State: fixed · Surface: supply-chain/provenance tooling.
+- Evidence: starting manifest ifconfig hash `98badbbbb05c706fd1fc65e0b9b66fe5bdcd0272de974c0fd7dc8b00533d052d`
+  did not match `ifconfig.c` from the release-key-verified 8.0 src.tar.gz.
+  upstream-diff.py incorrectly resolved sbin/ below sys/ rather than beside it.
+- Fix: `7cc433b`: use verified archive hash
+  `6266edbd533c0789383678a50fa22e859693f1f64b37cb42e656e1f02c6e4e34`,
+  resolve userland against tree.parent, and record chacha_private.h for HP KAT.
+- Validation: signed sys/src archive digests checked, all baseline entries match;
+  test_userland_resolves_beside_sys_tree checks both presence and missing failure.
+- Residual: base-release identity intentionally rejects unreviewed errata-modified
+  ifconfig; update provenance and patch after review, never silently bypass hash.
+
 ## Rejected claims
 
 - **R-1 (from AWG-001) — `m_pullup` reads past one cluster.** Counter-evidence: `m_pullup()` in
@@ -459,26 +563,26 @@ Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name 
 
 ## Open items — owner-facing decisions
 
-- **Lock-free obfuscation snapshot (AWG-020).** Open because the fix is design work: publish the
-  four ranges plus the 32-byte HPK as one SMR-published snapshot struct under `sc_lock`. Evidence
-  to close: a patch that builds on 8.0 and a `smoke-test.sh` case that reconfigures `h1..h4`/`HPK`
-  while traffic runs, with no torn range observed.
-- **H1–H4 legacy collisions (SECURITY.md row, k1).** Open because it matches the Linux module, so
-  tightening it is a protocol-compatibility question, not a code question. Evidence to close: a
-  decision that legacy peers may require non-overlapping `h1..h4`, plus a wire test against
-  `amneziawg-go` and the Android client.
-- **IPv6 routing policy (AWG-011).** Fixed as fail-closed with `AWG_ALLOW_IPV6_BYPASS=1`; open
-  question is whether the opt-in should be per-config (`AllowIPv6Leak`) rather than per-environment.
-  Evidence to close: a config-key parser test plus a VM run with a dual-stack provider config.
-- **Arbitrary config path (AWG-013).** Open pending the deployment fact: which `doas.conf` rules
-  are shipped. Evidence to close: the target `doas.conf` plus a run with a non-bare path.
-- **Group-writable source tree (AWG-014).** Open pending the deployment fact: whether `/usr/src`
-  is `root:wsrc 0775` on the target and whether `wsrc` members exist. Evidence to close:
-  `ls -ld /usr/src` and `cat /etc/group` from the target VPS.
-- **`ifconfig` source reuse across releases (AWG-023).** Open; needs the ident check and a
-  `patch --dry-run` gate. Evidence to close: a build on a tree with a stale `sbin/ifconfig`.
-- **Not covered by any test:** two-VM interop with `amneziawg-go`/Android and throughput at
-  1 vCPU (both listed in `docs/TESTING.md`), plus long-run stress and fuzzing.
+- **AWG-014 — release blocker:** root builds still use writable source trees.
+  Native lab facts: /usr/src root:wsrc 0775, sys symlink to lab-owned /home/build;
+  no wsrc members are required when the source owner itself is untrusted. Do not
+  run root make in this layout on a shared/production machine. Isolate verified
+  sources and compile unprivileged; validate install-only privilege separately.
+- **AWG-029 — release blocker:** kernel rollback exists, but ifconfig is still
+  replaced without an automatic paired backup/restore. A manual same-release
+  pair procedure is documented but NOT REHEARSED in this pass.
+- **AWG-020 — existing accepted limitation:** no snapshot/locking refactor here.
+  Keep live parameter changes controlled; broader authenticated-traffic soak and
+  lifetime/lock-order proof remain outstanding, not silently waived.
+- **Legacy H collisions — existing compatibility decision:** retained. Prefixes
+  can equalize lengths; do not promise collision configurations always handshake.
+  Collision/overlap interop against official clients remains NOT RUN.
+- **AWG-013/023/025/026:** local fixes and revalidation are recorded above.
+- **Outstanding acceptance gates:** clean verified full kernel build/boot; exact
+  ABI/old-new mismatch matrix; official Go/Linux/Android/Windows tunnels; IPv6,
+  roaming, rekey/loss/NAT/MTU; fault injection; long soak/fuzz; full install,
+  upgrade/rollback/rescue rehearsal; reproducible constrained-resource benchmarks.
+  These are NOT RUN, not PASS and not human-accepted exceptions.
 
 ## Process
 

@@ -6,7 +6,7 @@ the two release windows (May and November) plus any errata that touches `wg(4)`.
 
 **Current baseline: OpenBSD 8.0**, recorded as the file digests in
 `tools/upstream/8.0.sha256` (see `docs/UPSTREAM-TRACKING.md` for the full
-record). Release tags (`v0.1.x`) mark the points that were published; the tree
+record). Latest observed tag: `v0.2.0` at `2d71d8c`. Release tags mark published points; the tree
 may be ahead of the newest tag, so the manifest — not the tag — is what says
 which upstream tree the driver was compared against.
 
@@ -70,16 +70,22 @@ it.
 Finally a real tunnel: `awg-quick up`, handshake, `ping 3/3`, both legacy and
 3.1 with `HeaderProtectionKey`.
 
-## 4. Publish
+## 4. Release decision (not automatic publishing)
 
-```sh
-git commit -am "sync: adopt OpenBSD 8.1 net/if_wg.c"
-git tag -a v0.2.0 -m "OpenBSD 8.1 sync"
-git push --tags
-gh release create v0.2.0 --notes "Synced to OpenBSD 8.1 ..."
-```
+The current series is NOT READY for an RC; see `ENGINEERING-REPORT.md`. Before
+publishing, require every mandatory gate: verified clean kernel+ifconfig build,
+boot, negative/runtime/official-client interop, source/ABI support matrix, paired
+recovery rehearsal and independent patch review. Unresolved P1 exceptions require
+an explicit human risk decision; the agent cannot waive them.
 
-Update the "Current baseline" line above and the Tested table in `README.md`.
+Keep small reviewable commits, run the generated-patch and secret/history gates,
+and produce an artifact manifest/checksums only for artifacts actually built.
+Use a new approved tag, never reuse `v0.2.0`. Pushing, release publication, runner
+activation and deployment are separate authorized actions. No such action was
+performed in this pass. Update README/support policy only to the tested level.
+
+Candidate-release examples earlier in this document are illustrative, not a claim
+that 8.1 is supported or its release keys/media exist in the current environment.
 
 ## AmneziaWG protocol updates
 

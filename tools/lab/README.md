@@ -16,6 +16,25 @@ compiles the kernel inside the guest.
 | `smoke-test.sh` | PASS/FAIL gate inside the guest: bounds, key handling, handshake over loopback, malformed input |
 | `serial_read.py` | dumps the serial console to a file — the only way to read a panic after the fact |
 
+## Safety boundary and current status
+
+Only explicitly disposable, private lab VMs are authorized. The current pair is
+2 vCPU / 1 GB each and runs AWG.MP#5. No performance baseline at 1 vCPU exists.
+Individual scripts can destroy test interfaces; keep them away from production.
+
+Use `AWG_LAB_DISPOSABLE=1 make check-vm` / `make check-interop`. The Makefile now
+requires pinned host keys (`LAB_KNOWN_HOSTS`); obtain keys/fingerprints from the
+local VM console and verify before populating that file. TOFU acceptance is at
+most a deliberate disposable-loopback bootstrap, not a production SSH policy.
+`A_SSH`/`B_SSH` remain trusted operator shell-command overrides (including quoted
+key paths); never populate them from peers/config files. All metacharacter/path
+overrides have not been exhaustively tested.
+
+Interop refuses an existing awg0, requires PF **already disabled in the isolated
+lab**, and leaves PF unchanged. It checks sender status, receiver bytes and SHA256.
+The old OpenBSD-invalid `nc -l -p` listener and timer-only success are fixed.
+This is not a benchmark, full protocol matrix, long soak or leak-freedom proof.
+
 ## Bring-up
 
 On the host (needs `/dev/kvm`, `qemu`, `python3-pexpect`; a container with
@@ -23,11 +42,17 @@ On the host (needs `/dev/kvm`, `qemu`, `python3-pexpect`; a container with
 
 ```sh
 cp tools/lab/install.conf.example /lab/install.conf   # set a password
-curl -O https://cdn.openbsd.org/pub/OpenBSD/8.0/amd64/install80.iso -o /lab/install80.iso
-curl -O https://cdn.openbsd.org/pub/OpenBSD/8.0/amd64/SHA256.sig -o /lab/SHA256.sig
-curl -O https://cdn.openbsd.org/pub/OpenBSD/8.0/amd64/sys.tar.gz -o /lab/sys80.tar.gz
-curl -O https://cdn.openbsd.org/pub/OpenBSD/8.0/src.tar.gz  -o /lab/src80.tar.gz
-signify -C -p /etc/signify/openbsd-80-base.pub -x /lab/SHA256.sig   # verify the ISO first
+curl -fLo /lab/install80.iso https://cdn.openbsd.org/pub/OpenBSD/8.0/amd64/install80.iso
+curl -fLo /lab/SHA256.sig https://cdn.openbsd.org/pub/OpenBSD/8.0/amd64/SHA256.sig
+# Use a release key from an already trusted OpenBSD installation.
+(cd /lab && signify -C -p /etc/signify/openbsd-80-base.pub -x SHA256.sig install80.iso)
+curl -fLo /lab/sys.tar.gz https://cdn.openbsd.org/pub/OpenBSD/8.0/sys.tar.gz
+curl -fLo /lab/src.tar.gz https://cdn.openbsd.org/pub/OpenBSD/8.0/src.tar.gz
+curl -fLo /lab/source-SHA256.sig https://cdn.openbsd.org/pub/OpenBSD/8.0/SHA256.sig
+(cd /lab && signify -C -p /etc/signify/openbsd-80-base.pub -x source-SHA256.sig sys.tar.gz src.tar.gz)
+# Existing lab helpers expect these names, only after verification:
+cp /lab/sys.tar.gz /lab/sys80.tar.gz
+cp /lab/src.tar.gz /lab/src80.tar.gz
 DISKSIZE=40G VMNAME=obsd-a python3 tools/lab/install_vm.py
 ```
 

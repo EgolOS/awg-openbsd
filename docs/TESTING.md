@@ -12,9 +12,38 @@ Two OpenBSD VMs on a private L2 segment:
 | `obsd-a` | server | 1 vCPU / 1 GB | matches the target VPS |
 | `obsd-b` | client | 2 vCPU / 1 GB | |
 
-Both boot the `AWG.MP` kernel built by `install.sh build`. The client can also
+The existing lab currently has **2 vCPU / 1 GB on both guests**, contrary to the
+target row above. Both run historical `AWG.MP#5`; no clean rebuild/reboot was done
+in the current pass. The valid installer flag is `--build-only`, not `build`.
+The client can also
 run `amneziawg-go` from the OpenBSD port or a Linux/Android/Windows AmneziaWG
 client for interoperability.
+
+## Current executed evidence
+
+See `ENGINEERING-REPORT.md` and `evidence/2026-11-07/` for actual commands/results.
+`make check` now includes offline `tools/tests/` regressions (real signify fixtures,
+not a second parser). Native OpenBSD tests separately exercised ownership via
+actual doas, generator tracing/permissions/cleanup, all secret-key stdin ordering,
+stale ifconfig rejection and an unprivileged patched-ifconfig build.
+
+The optional `test_hp_vector.py` consumes a verified OpenBSD 8.0 `sys/` tree:
+`OPENBSD_SYS_TREE=/verified/sys make check-tests`. It compiles the real
+`awg_hp_init` with the digest-pinned ChaCha header (only its kernel include is
+adapted) and compares the keystream with OpenSSL. This is a userspace KAT, not
+kernel fuzzing, a sanitizer result, or a Go client interoperability test.
+
+Destructive lab targets require **AWG_LAB_DISPOSABLE=1**. SSH host keys are pinned
+by default (`LAB_KNOWN_HOSTS`). Never target a production VPN or general-purpose
+host. Interop refuses an existing awg0 and no longer changes PF. Legacy individual
+smoke/wire/matrix/stress scripts can still destroy awg0/awg1; do not bypass the
+lab boundary by running them directly on a live server.
+
+`interop-test.sh` now verifies sender status plus exactly 8 MiB received and its
+SHA256; the earlier timer-only transfer PASS was invalid evidence (AWG-034).
+The existing stress script exercises bounded version/config/peer churn and random
+loopback datagrams; it does **not** establish bidirectional authenticated traffic
+throughout every phase, long-run leak freedom, loss/reordering or a full soak.
 
 ## Functional matrix
 
@@ -92,7 +121,7 @@ ping -c 1 10.8.9.2      # pre-fix: kernel panics here
 
 | Client | Status |
 |---|---|
-| `awg(4)` to `awg(4)`, two VMs, 3.1 | **verified here** — `make check-interop` |
+| `awg(4)` to `awg(4)`, two VMs, 3.1 | **verified here** — handshake, IPv4 ICMP, exact receiver bytes+SHA256; no HPK in this interop profile |
 | AmneziaWG for Android/Windows (legacy 2.0) | reported by the upstream fork, not re-run here |
 | `amneziawg-go` (3.1) | reported by the upstream fork, not re-run here |
 | Linux kernel module (3.1) | reported by the upstream fork; not re-run, and not with `HeaderProtectionKey` |

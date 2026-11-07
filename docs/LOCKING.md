@@ -95,22 +95,24 @@ parameters while the interface is down (`awg-quick down`, edit, `awg-quick up`).
 The decision is **to keep accepting them and to keep documenting it**, for these
 reasons:
 
-1. **Classification is length-first.** `awg_classify()` only compares the type
-   field after `len == s[i] + hs[i].size` matches, and the three handshake
-   structs have different layouts and therefore different sizes
-   (`awg_pkt_initiation` carries `ue`+`es`+`ets`, `awg_pkt_response` only
-   `ue`+`en`, `awg_pkt_cookie` a nonce and an encrypted cookie,
-   `src/if_awg.c:110-132`). Two identical `H` values cannot make an initiation
-   be read as a response or a cookie, because the length test fails first.
+1. **Classification is length-first, but prefixes matter.** Distinct base
+   handshake sizes are not a universal disambiguator: S1/S2/S3 can make total
+   datagram lengths equal (for example 148+0 and 92+56). With colliding H values,
+   the first matching candidate wins, and authentication can then fail. This is
+   an availability/compatibility trade-off, not proof collisions always work.
 2. **Data packets are separated by size and by index.** A transport packet is
    `len >= s4 + AWG_MIN_DATA_SIZE`; a handshake-length datagram that also
    matched `H4` would still fail the AEAD tag because `r_idx` is random.
-3. **The Linux module behaves the same way**, so rejecting collisions would
-   break configs that work on the reference implementation — the exact
-   interoperability cost the protocol exists to avoid.
+3. **Keep the existing compatibility acceptance.** The pinned official Go
+   receive classifier uses the same candidate ordering as C. This supports the
+   classification comparison, not a claim that every overlapping configuration
+   is accepted by every client's configuration API. Official-client collision
+   interoperability remains NOT RUN; do not introduce a new rejection without
+   protocol and runtime evidence.
 4. A collision that does matter (two *peers* configured with the same interface
    parameters) is not a driver problem but a configuration one, and the server
-   generator (`tools/gen-config.sh`) emits distinct values per interface.
+   generator (`tools/gen-config.sh`) now rejects duplicate draws (bounded retry),
+   avoiding this ambiguity for newly generated configurations.
 
 This is recorded as a decision, not a gap: `SECURITY.md` row updated to say
 "accepted, by design, see docs/LOCKING.md §5".

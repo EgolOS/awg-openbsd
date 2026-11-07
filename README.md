@@ -1,6 +1,6 @@
 # AmneziaWG for OpenBSD
 
-Native kernel driver (`awg(4)`) for [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) — an obfuscated WireGuard fork — on OpenBSD 7.x and 8.x amd64.
+Native kernel driver (`awg(4)`) for [AmneziaWG](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module) — an obfuscated WireGuard fork — targeting OpenBSD 8.0 amd64 (7.9 has historical compile-only evidence).
 
 OpenBSD ships WireGuard (`wg(4)`) built into GENERIC. This project adds a parallel `awg(4)` pseudo-device to a custom kernel, providing the AmneziaWG obfuscation that is used on Linux and Windows, without any userspace daemon.
 
@@ -11,9 +11,17 @@ Two protocol versions are supported, selected per interface (see [Protocol versi
 
 AWG parameters are configured directly through `ifconfig(8)` — the same tool used for standard WireGuard on OpenBSD — with no external helper binary required.
 
+## Release status
+
+**NOT READY for a new release candidate.** Local hardening/test changes are
+recorded in [the engineering report](docs/ENGINEERING-REPORT.md). Root builds
+from writable sources (AWG-014), paired kernel/ifconfig recovery (AWG-029),
+clean-build provenance and official-client interoperability remain release gates.
+The following install commands are for a disposable lab, not a remote-only server.
+
 ## Quick start
 
-On a fresh OpenBSD 8.0/7.9 amd64 install, as root or with `doas`:
+On a disposable OpenBSD 8.0 amd64 lab, after reviewing the recovery runbook:
 
 ```sh
 doas pkg_add git bash
@@ -25,7 +33,11 @@ uname -v                     # AWG.MP#<n>
 doas sh tools/gen-config.sh --endpoint vpn.example.com:51820
 ```
 
-Then put the server half of that output in `/etc/amnezia/amneziawg/vpn.conf`
+The generator writes an exclusive **0600 `pair.conf`**, not keys to the terminal.
+Use `--output /root/pair.conf` for a different new file; `--stdout` is deliberate
+plaintext export (protect any redirection with `umask 077`). It generates legacy
+IPv4 tunnel addresses, accepts bracketed IPv6 endpoints, and refuses a busy awg9.
+Put the server half of that file in `/etc/amnezia/amneziawg/vpn.conf`
 (mode 0600), `doas awg-quick up vpn`, and import the client half into the
 AmneziaWG app. Full walkthrough including the firewall: [`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md).
 
@@ -50,7 +62,7 @@ Interfaces are named `awg0`, `awg1`, … Configs live in `/etc/amnezia/amneziawg
 
 ## Requirements
 
-- OpenBSD 7.x or 8.x amd64 (tested on 8.0; builds on 7.9)
+- OpenBSD 8.0 amd64 baseline; 7.9 is compile-only historical, not installer/runtime support
 - Root access
 - Packages: `bash` — `install.sh` installs it automatically
 - Kernel sources and ifconfig sources — downloaded from the OpenBSD CDN automatically if missing
@@ -100,6 +112,8 @@ Config files go in `/etc/amnezia/amneziawg/`. The filename (without `.conf`) is 
 doas mkdir -p /etc/amnezia/amneziawg
 doas chmod 700 /etc/amnezia/amneziawg
 doas cp myvpn.conf /etc/amnezia/amneziawg/
+doas chown root:wheel /etc/amnezia/amneziawg/myvpn.conf
+doas chmod 600 /etc/amnezia/amneziawg/myvpn.conf
 ```
 
 Config format is standard WireGuard + AWG obfuscation fields:
@@ -127,7 +141,9 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 ```
 
-If `Jc`–`H4` are all zero or absent, AWG behaves identically to standard WireGuard.
+Plain-WireGuard wire format is intended with junk/prefixes disabled and H1–H4
+set to **1, 2, 3, 4**, not all zero. Stock wg(4) interoperability has not been
+re-run in this engineering pass.
 
 #### Protocol version
 
@@ -185,8 +201,11 @@ The private key is never put on a command line: `awg-quick` feeds it to
 `ifconfig awgN awgkey -` on stdin, because the argument vector of a root
 process is readable with `ps(1)` and lands in core dumps. Pre-/post-up hooks
 (`%i`/`%I` substitution) still run as root shell — treat a config file as a
-root program: only copy configs you trust, and keep them `0600` in a `0700`
-directory.
+root program: only copy configs you trust. The file must be root-owned,
+`0600`/`0400`, and every canonical ancestor must be root-owned with no group/other
+write permission. Prefer `/etc/amnezia/amneziawg/` mode `0700`. Private keys, HPKs
+and PSKs all use stdin in automated configuration; manual argv examples below
+remain available but can disclose secrets through process listings.
 
 If `AllowedIPs` contains IPv6 networks (e.g. `::/0`) but `Address` has no IPv6
 address, `awg-quick` refuses to bring the tunnel up: the route cannot be
@@ -375,19 +394,19 @@ Two findings from the first audit are worth knowing about:
 |---|---|---|
 | OpenBSD | 8.0 amd64 (GENERIC.MP) | builds with `-Werror`, kernel boots, `make check-vm` passes in the lab VM |
 | OpenBSD | 7.9 amd64 | `if_awg.c` and `awg_noise.c` compile clean against the 7.9 sources (no kernel build, no runtime test) |
-| AmneziaWG legacy 2.0 | Android/Windows client | handshake + data verified *(reported by the upstream fork; not re-run here)* |
-| AmneziaWG 3.1 | `amneziawg-go` client | handshake + data verified, header protection, `I1`, `S3`/`S4` *(reported by the upstream fork; not re-run here)* |
-| Throughput, 1 vCPU / 1 GB server | `iperf3` | 350 Mbit/s up, 973 Mbit/s down, legacy kernel↔kernel *(reported by the upstream fork; not measured here)* |
+| AmneziaWG legacy | Android/Windows client | **NOT RUN here**; inherited upstream report only |
+| AmneziaWG 3.1 | official Go/Linux clients | **NOT RUN here**; source revisions pinned in the engineering report |
+| Throughput, 1 vCPU / 1 GB server | TCP/UDP baseline | **NOT RUN here**; inherited figures are not release evidence |
 
-Rows marked "reported by the upstream fork" are inherited from the tree this
-repository is derived from. They are plausible and were not contradicted by this
-fork's loopback and VM tests, but they have not been reproduced here — the lab
-does not yet have a second VM, so no interop or throughput number is claimed as
-verified by this project.
+Inherited client/throughput reports above are **not project verification**.
+Two OpenBSD 8.0 AWG.MP#5 VMs were re-tested here: 3.1 handshake, ICMP and an
+8 MiB transfer whose receiver length and SHA256 were verified. Both currently
+have 2 vCPU / 1 GB; this is not the constrained 1-vCPU benchmark profile.
+See the engineering report for the exact support/compatibility matrix.
 
 Deploying on a VPS (kernel build, pf policy, tunnel, sysupgrade survival):
-[`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md). `tools/gen-config.sh` prints a
-matching server/client config pair with fresh keys.
+[`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md). `tools/gen-config.sh` writes a
+private server/client pair file with fresh keys.
 
 See [`docs/TESTING.md`](docs/TESTING.md) for the matrix, the negative tests that
 must not panic, and how to reproduce them. Upgrading the OS replaces `/bsd`;
@@ -396,11 +415,13 @@ see [`docs/RUNBOOK-sysupgrade.md`](docs/RUNBOOK-sysupgrade.md).
 ## Development checks
 
 The repository carries its own gates. `make check` runs anywhere;
-the others need the lab VMs described in `tools/lab/README.md`.
+the others need the lab VMs described in `tools/lab/README.md`. Destructive lab
+targets additionally require `AWG_LAB_DISPOSABLE=1` and pinned SSH host keys.
+Optional HP keystream KAT: `OPENBSD_SYS_TREE=/verified/sys make check-tests`.
 
 | Command | What it proves |
 | --- | --- |
-| `make check` | shell syntax, the Python tools compile, the publish scan is clean, `awg-openbsd.patch` matches `src/` |
+| `make check` | syntax, Python compile, offline security regressions, publish scan, generated patch freshness; signature fixture skips explicitly if signify is absent |
 | `make check-vm` | four gates in one VM: `smoke-test` (lifecycle, handshake, malformed input), `wire-test`, `matrix-test` (every parameter at its bound), `stress-test` (200 version switches under traffic) |
 | `make check-interop` | two VMs, real link: 3.1 handshake, ICMP through the tunnel, 8 MiB transfer, counters |
 | `make baseline TREE=/usr/src/sys` | function-level divergence against a stock OpenBSD tree, checked against the recorded baseline |
@@ -424,18 +445,12 @@ the fork carries them until they land.
 
 ## Performance
 
-Loopback benchmark: two interfaces in separate rdomains on the same machine, tunnel over 127.0.0.1, iperf3 (TCP) through the tunnel, 8 s per run, three runs each. OpenBSD 8.0 VM, 4 vCPU on an AMD Ryzen 7 5800H (7.9 gives the same results within run-to-run noise).
-
-| Configuration | 1 stream, Mbit/s | 4 streams, Mbit/s |
-|---|---|---|
-| WireGuard `wg(4)` baseline | 897–910 | 907–939 |
-| AWG legacy, no obfuscation | 882–900 | 856–905 |
-| AWG legacy, Jc=4, S1=26, S2=33, custom H1–H4 | 946–989 | 925–954 |
-| AWG 3.1, all parameters (S1–S4, H ranges, I1/I3, HeaderProtectionKey, ContentPaddingAddition, RandomTrailers, timings) | 795–817 | 804–846 |
-
-**Legacy obfuscation costs nothing measurable on the data path**: junk packets, prefix bytes and magic headers only affect handshake packets. The 3.1 parameters `S4`, `HeaderProtectionKey`, `ContentPaddingAddition` and `RandomTrailers` touch every data packet and cost roughly 10% here. AllowedIPs lookups use an ART (Allotment Routing Table) with O(prefix length) complexity, so the number of entries does not affect throughput or latency.
-
-Real-world throughput is limited by the peer's bandwidth and RTT, not the driver.
+No reproducible project-owned throughput baseline is established by this pass.
+Previously advertised loopback figures and universal “driver is not the bottleneck”
+claims are withdrawn pending logs, exact revisions and repeatable resource profiles.
+The 8 MiB nc integrity check is a functional test, not a TCP/UDP benchmark.
+Required next measurements: stock wg(4), plain/legacy/complete 3.1 AWG; repeated
+TCP/UDP throughput, latency, loss, CPU and pool/mbuf pressure, including 1 vCPU/1 GB.
 
 ## awg-quick internals
 
@@ -459,7 +474,7 @@ On **FreeBSD**, you can — there is an official `amnezia-kmod` package that ins
 
 On **OpenBSD**, this is not possible. OpenBSD does not support loadable kernel modules for network drivers — the kernel is monolithic and all pseudo-devices must be compiled in. The upstream `wg(4)` driver is compiled directly into `GENERIC`, not shipped as a `.ko`. There is no AmneziaWG package for OpenBSD and no shortcut: the only way is to fork `if_wg.c`, extend it with AWG obfuscation, and build a custom kernel. That is exactly what this project does.
 
-As of 2026, **this is the only native kernel-level AmneziaWG implementation for OpenBSD**.
+This is a native kernel-level AmneziaWG implementation for OpenBSD; no exclusivity claim is made.
 
 ## Repo layout
 
@@ -481,6 +496,5 @@ docs/                             architecture, upstream tracking, security regi
                                   locking, testing, runbooks
 tools/                            publish scan, upstream diff, sync check, release
                                   manifest, lab VM scripts
-.github/workflows/ci.yml          host checks on every push; kernel build on a
-                                  self-hosted OpenBSD runner
+.github/workflows/ci.yml          GitHub-hosted checks only; no privileged runner
 ```

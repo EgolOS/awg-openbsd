@@ -1,0 +1,2 @@
+PASS: native OpenBSD sh -x generator, 0600 exclusive file, no key output, IPv6 endpoint, interface cleanup # scan:allow-fixture
+PASS: native generator refuses existing output # scan:allow-fixture

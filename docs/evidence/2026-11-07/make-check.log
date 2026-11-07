@@ -1,0 +1,38 @@
+shell syntax: OK
+python: OK
+test_default_output_private_and_stdin_keys (test_gen_config.GeneratorSecurity.test_default_output_private_and_stdin_keys) ... ok
+test_entropy_collision_retries_are_bounded (test_gen_config.GeneratorSecurity.test_entropy_collision_retries_are_bounded) ... ok
+test_existing_output_untouched (test_gen_config.GeneratorSecurity.test_existing_output_untouched) ... ok
+test_explicit_export_and_ipv6_endpoint (test_gen_config.GeneratorSecurity.test_explicit_export_and_ipv6_endpoint) ... ok
+test_h_values_are_distinct (test_gen_config.GeneratorSecurity.test_h_values_are_distinct) ... ok
+test_invalid_inputs_refused_before_kernel_calls (test_gen_config.GeneratorSecurity.test_invalid_inputs_refused_before_kernel_calls) ... ok
+test_partial_failure_cleans_interface_and_output (test_gen_config.GeneratorSecurity.test_partial_failure_cleans_interface_and_output) ... ok
+test_preexisting_interface_untouched (test_gen_config.GeneratorSecurity.test_preexisting_interface_untouched) ... ok
+test_symlink_output_untouched (test_gen_config.GeneratorSecurity.test_symlink_output_untouched) ... ok
+test_xtrace_disabled_before_key_generation (test_gen_config.GeneratorSecurity.test_xtrace_disabled_before_key_generation) ... ok
+test_ietf_counter_zero_keystream (test_hp_vector.HeaderProtectionVector.test_ietf_counter_zero_keystream) ... ok
+test_patched_tree_checks_pristine_original (test_installer_source.InstallerSource.test_patched_tree_checks_pristine_original) ... ok
+test_recorded_source_accepted (test_installer_source.InstallerSource.test_recorded_source_accepted) ... ok
+test_stale_source_rejected (test_installer_source.InstallerSource.test_stale_source_rejected) ... ok
+test_receiver_corruption_is_reported (test_interop_harness.InteropHarness.test_receiver_corruption_is_reported) ... ok
+test_requires_explicit_disposable_lab_opt_in (test_interop_harness.InteropHarness.test_requires_explicit_disposable_lab_opt_in) ... ok
+test_sender_failure_is_reported (test_interop_harness.InteropHarness.test_sender_failure_is_reported) ... ok
+test_all_secret_keys_use_stdin_in_argument_order (test_quick_parser.QuickParser.test_all_secret_keys_use_stdin_in_argument_order) ... ok
+test_decimal_leading_zero_range (test_quick_parser.QuickParser.test_decimal_leading_zero_range) ... ok
+test_lists_do_not_expand_filenames (test_quick_parser.QuickParser.test_lists_do_not_expand_filenames) ... ok
+test_user_owned_config_is_refused (test_quick_parser.QuickParser.test_user_owned_config_is_refused) ... ok
+test_ci_never_schedules_persistent_self_hosted_runner (test_release_security.ReleaseSecurity.test_ci_never_schedules_persistent_self_hosted_runner) ... ok
+test_signed_archive_checks_fail_closed (test_release_security.ReleaseSecurity.test_signed_archive_checks_fail_closed) ... ok
+test_userland_resolves_beside_sys_tree (test_upstream_manifest.UpstreamManifest.test_userland_resolves_beside_sys_tree) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 0.810s
+
+OK
+SELF-TEST: ok
+files scanned: 70  history: False
+RESULT: clean
+publish scan: clean
+awg-openbsd.patch is up to date
+generated patch: current
+repository checks: OK

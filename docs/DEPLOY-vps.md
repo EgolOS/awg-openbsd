@@ -3,9 +3,12 @@
 Target used for the numbers in this document: 1 vCPU / 1 GB RAM / 50 GB disk,
 OpenBSD 8.0-release with errata, GENERIC.MP, serial console through `vmctl(8)`.
 
-The provider does not publish bandwidth figures. Treat the interface speed as
-unknown until you measure it; the driver is not the bottleneck at 1 vCPU for
-anything up to a few hundred Mbit/s.
+Treat provider capacity and driver overhead as unmeasured until a reproducible
+benchmark is run. The current lab is 2 vCPU / 1 GB per VM, not this target profile.
+
+**Deployment gate:** AWG-014 and AWG-029 remain release blockers. Do not use the
+installer on a production or remote-only host until trusted build isolation and
+paired recovery have been rehearsed; see `RUNBOOK-sysupgrade.md`.
 
 ## 0. Before you start
 
@@ -99,7 +102,8 @@ Keep the console reachable: with `ddb.panic=1` a panic leaves the machine in
 ## 5. Firewall
 
 `install.sh` prints the MSS rule and leaves `/etc/pf.conf` alone. A minimal
-policy for a VPN endpoint:
+policy fragment for a VPN endpoint (merge into the existing reviewed policy;
+do not overwrite administrator rules or management access):
 
 ```
 set skip on lo
@@ -147,9 +151,10 @@ echo 'awg-quick up vpn' >> /etc/rc.local     # or a small rc.d script
 ## 7. Client side
 
 Generate the client config with the obfuscation parameters that match the
-server exactly (`Jc`/`Jmin`/`Jmax`, `S1`–`S4`, `H1`–`H4`, and in 3.1 the
-`HeaderProtectionKey` and `I1`–`I5`). `tools/gen-config.sh` in this repository
-prints a matching pair.
+receiver for S1–S4, H1–H4 and HeaderProtectionKey; handshake trailer acceptance
+must accommodate the sender. Junk and I1–I5 are sender-local, not matching keys.
+See the source-qualified matrix in `ENGINEERING-REPORT.md`. The generator writes
+a new 0600 pair file by default, with explicit `--stdout` for plaintext export.
 
 ## 8. What to watch
 

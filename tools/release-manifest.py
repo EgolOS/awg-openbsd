@@ -102,7 +102,9 @@ def build_manifest(args):
         tools.append({"name": os.path.basename(rel), "path": rel,
                       "sha256": sha256_file(os.path.join(repo, rel))})
 
-    host = args.build_host if args.build_host else socket.gethostname()
+    # A release artefact is public: never record the absolute path of the build
+    # host's kernel or its hostname. Both leak where the build happened.
+    host = args.build_host if args.build_host else "unspecified"
     arch = args.arch if args.arch else platform.machine()
 
     return {
@@ -112,7 +114,7 @@ def build_manifest(args):
         "arch": arch,
         "driver_commit": args.commit,
         "kernel": {
-            "path": args.kernel,
+            "name": os.path.basename(args.kernel),
             "sha256": kernel_sha256,
             "size": kernel_size,
         },

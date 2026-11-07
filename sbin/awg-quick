@@ -96,13 +96,31 @@ need_range() {	# need_range <Field> <value> [max] — value or low-high
 	if [[ $v == *-* ]]; then
 		need_uint "$field low" "${v%%-*}" "$max"
 		need_uint "$field high" "${v#*-}" "$max"
-		(( ${v%%-*} <= ${v#*-} )) || die "$field range must be low-high, got \`$v'"
+		(( 10#${v%%-*} <= 10#${v#*-} )) || die "$field range must be low-high, got \`$v'"
 	else
 		need_uint "$field" "$v" "$max"
 	fi
 }
 
+# Hooks are root programs. Mode 0600 alone does not make a user-owned file
+# trusted, and a writable ancestor permits replacing an otherwise safe file.
+trusted_config_path() {
+	local path=$1 owner mode
+	[[ -f $path ]] || die "config must be a regular file"
+	while :; do
+		owner=$(stat -f %u "$path") || die "cannot stat config path"
+		mode=$(stat -f %Lp "$path") || die "cannot stat config path"
+		[[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] || die "config path must be root-owned: $path"
+		(( (8#$mode & 0022) == 0 )) || die "config path must not be group/other-writable: $path"
+		[[ $path == / ]] && break
+		path=${path%/*}; [[ -n $path ]] || path=/
+	done
+}
+
 parse_options() {
+	# Save shell options: list splitting must never expand globs from cwd.
+	local -
+	set -f
 	local line key value stripped v
 	local in_interface=0 in_peer=0
 	local cur_pubkey="" cur_psk="" cur_endpoint="" cur_aips="" cur_pka=""
@@ -113,8 +131,9 @@ parse_options() {
 	[[ -e $CONFIG_FILE ]] || die "\`$CONFIG_FILE' does not exist"
 	[[ $CONFIG_FILE =~ (^|/)([a-zA-Z0-9_=+.-]{1,15})\.conf$ ]] || \
 		die "The config file must be a valid interface name, followed by .conf"
-	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
 	INTERFACE="${BASH_REMATCH[2]}"
+	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
+	trusted_config_path "$CONFIG_FILE"
 
 	# The config holds the long-term private key and can carry PreUp/PostUp
 	# commands that run as root. Refuse one other users can read.
@@ -340,6 +359,8 @@ up_if() {
 
 # Configure AWG interface via ifconfig — no 'awg' tool needed
 set_config() {
+	local -
+	set -f
 	local args=()
 
 	[[ -n $PRIVATE_KEY ]] || die "no PrivateKey"
@@ -664,13 +685,14 @@ cmd_up() {
 	set_mtu
 	up_if
 	set_dns
-	local aip all_aips=( )
+	local aip all_aips=( ) peer_aips=( )
 	for (( i=0; i<PEER_COUNT; i++ )); do
-		for aip in ${PEER_AIPS[$i]}; do all_aips+=( "$aip" ); done
+		read -r -a peer_aips <<< "${PEER_AIPS[$i]}"
+		all_aips+=( "${peer_aips[@]}" )
 	done
-	for aip in $(printf '%s\n' "${all_aips[@]}" | sort -nr -k2 -t/); do
-		add_route "$aip"
-	done
+	while IFS= read -r aip; do
+		[[ -z $aip ]] || add_route "$aip"
+	done < <(printf '%s\n' "${all_aips[@]}" | sort -nr -k2 -t/)
 	set_endpoint_direct_route
 	monitor_daemon
 	execute_hooks "${POST_UP[@]}"

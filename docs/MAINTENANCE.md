@@ -4,8 +4,11 @@ The driver is a copy of `net/if_wg.c` with an obfuscation layer on top, so it
 has to be re-synced whenever OpenBSD changes that file. In practice that means
 the two release windows (May and November) plus any errata that touches `wg(4)`.
 
-**Current baseline: OpenBSD 8.0** (synced 2026-11-07, tag `v0.1.4`).
-Record the new baseline here every time you finish a sync.
+**Current baseline: OpenBSD 8.0**, recorded as the file digests in
+`tools/upstream/8.0.sha256` (see `docs/UPSTREAM-TRACKING.md` for the full
+record). Release tags (`v0.1.x`) mark the points that were published; the tree
+may be ahead of the newest tag, so the manifest — not the tag — is what says
+which upstream tree the driver was compared against.
 
 ## 1. Get the new tree and report the delta
 
@@ -21,8 +24,11 @@ python3 tools/sync-check.py --base /tmp/sys80/sys/net/if_wg.c \
                             --new  /tmp/sys81/sys/net/if_wg.c
 ```
 
-`sync-check.py` exits non-zero when anything needs action — conflicts, but also
-functions added or removed upstream — so it can gate a release script.
+`sync-check.py` exits non-zero when anything needs action — a conflicting
+function, or one added or removed upstream — so it can gate a release script.
+`tools/upstream-diff.py --tree <sys>` answers the other question: how far the
+driver as a whole diverges from the recorded baseline (identical / modified /
+AWG-only per function).
 
 The report sorts upstream changes into three piles:
 
@@ -32,8 +38,8 @@ The report sorts upstream changes into three piles:
 | `=` | upstream changed a function we never touched | take the upstream body verbatim |
 | `!` | we changed that function too | merge by hand — this is the only real work |
 
-Exit status is 1 when there is at least one `!`. Run with `--verbose` to get
-the hunks for those.
+Exit status is 1 when there is at least one `!`, or when a function was added
+or removed upstream. Run with `--verbose` to get the hunks for the `!` rows.
 
 ## 2. The functions we own
 

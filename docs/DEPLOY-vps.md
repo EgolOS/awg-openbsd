@@ -69,6 +69,7 @@ Then:
 doas pkg_add git
 git clone https://github.com/EgolOS/awg-openbsd /root/awg-openbsd
 cd /root/awg-openbsd
+doas ./install.sh --check        # reports missing keys/sources; changes nothing
 doas ./install.sh --all          # tools + kernel, ~35-50 min on 1 vCPU
 doas reboot
 ```

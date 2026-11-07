@@ -3171,9 +3171,13 @@ awg_reset_3_1(struct awg_softc *sc, struct awg_ispec old[AWG_ISPEC_COUNT])
 	sc->sc_awg_disable_cookies = 0;
 	awg_update_noise_timings(sc);
 
+	/*
+	 * The caller hands in a zeroed array and owns the entries afterwards;
+	 * freeing here would free whatever the caller's stack happened to hold
+	 * (a bad free of a stack address panics in free(9)).
+	 */
 	rw_enter_write(&sc->sc_ispec_lock);
 	for (i = 0; i < AWG_ISPEC_COUNT; i++) {
-		awg_ispec_free(&old[i]);
 		old[i] = sc->sc_awg_ispec[i];
 		bzero(&sc->sc_awg_ispec[i], sizeof(sc->sc_awg_ispec[i]));
 	}
@@ -3380,8 +3384,12 @@ next_peer:
 			 * I1-I5 into the array it is handed. That must not be
 			 * the freshly parsed ispec[]: it would free the new
 			 * values and hand the old ones back to the install
-			 * loop below, resurrecting them.
+			 * loop below, resurrecting them. The array is zeroed
+			 * first: the reset only moves ownership, so an
+			 * uninitialised stack array would be freed as if it
+			 * held ispecs.
 			 */
+			bzero(dropped, sizeof(dropped));
 			awg_reset_3_1(sc, dropped);
 			for (i = 0; i < AWG_ISPEC_COUNT; i++)
 				awg_ispec_free(&dropped[i]);

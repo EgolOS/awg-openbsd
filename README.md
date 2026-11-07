@@ -373,11 +373,17 @@ Two findings from the first audit are worth knowing about:
 
 | Component | Version | Result |
 |---|---|---|
-| OpenBSD | 8.0 amd64 (GENERIC.MP) | builds with `-Werror`, kernel boots |
-| OpenBSD | 7.9 amd64 | `if_awg.c` and `awg_noise.c` compile clean against the 7.9 sources |
-| AmneziaWG legacy 2.0 | Android/Windows client | handshake + data verified |
-| AmneziaWG 3.1 | `amneziawg-go` client | handshake + data verified (header protection, `I1`, `S3`/`S4`) |
-| Throughput, 1 vCPU / 1 GB server | `iperf3` | 350 Mbit/s up, 973 Mbit/s down (legacy, kernel↔kernel) |
+| OpenBSD | 8.0 amd64 (GENERIC.MP) | builds with `-Werror`, kernel boots, `make check-vm` passes in the lab VM |
+| OpenBSD | 7.9 amd64 | `if_awg.c` and `awg_noise.c` compile clean against the 7.9 sources (no kernel build, no runtime test) |
+| AmneziaWG legacy 2.0 | Android/Windows client | handshake + data verified *(reported by the upstream fork; not re-run here)* |
+| AmneziaWG 3.1 | `amneziawg-go` client | handshake + data verified, header protection, `I1`, `S3`/`S4` *(reported by the upstream fork; not re-run here)* |
+| Throughput, 1 vCPU / 1 GB server | `iperf3` | 350 Mbit/s up, 973 Mbit/s down, legacy kernel↔kernel *(reported by the upstream fork; not measured here)* |
+
+Rows marked "reported by the upstream fork" are inherited from the tree this
+repository is derived from. They are plausible and were not contradicted by this
+fork's loopback and VM tests, but they have not been reproduced here — the lab
+does not yet have a second VM, so no interop or throughput number is claimed as
+verified by this project.
 
 Deploying on a VPS (kernel build, pf policy, tunnel, sysupgrade survival):
 [`docs/DEPLOY-vps.md`](docs/DEPLOY-vps.md). `tools/gen-config.sh` prints a
@@ -386,6 +392,23 @@ matching server/client config pair with fresh keys.
 See [`docs/TESTING.md`](docs/TESTING.md) for the matrix, the negative tests that
 must not panic, and how to reproduce them. Upgrading the OS replaces `/bsd`;
 see [`docs/RUNBOOK-sysupgrade.md`](docs/RUNBOOK-sysupgrade.md).
+
+## Development checks
+
+The repository carries its own gates. Only `make check-vm` and `make baseline`
+need a running OpenBSD system; the rest run anywhere.
+
+| Command | What it proves |
+| --- | --- |
+| `make check` | shell syntax, the Python tools compile, the publish scan is clean, `awg-openbsd.patch` matches `src/` |
+| `make check-vm` | copies `tools/lab/smoke-test.sh` into the lab VM and runs it as root; exits non-zero on any failing case |
+| `make baseline TREE=/usr/src/sys` | function-level divergence against a stock OpenBSD tree, checked against the recorded baseline |
+
+Design and maintenance documents:
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — receive and transmit paths, locking, peer state, ioctl contract
+- [`docs/UPSTREAM-TRACKING.md`](docs/UPSTREAM-TRACKING.md) — the 8.0 baseline, which functions diverge, how to move the baseline to a new release
+- [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) — findings register: what was found, what is fixed, which test proves it
 
 ## Upstream
 

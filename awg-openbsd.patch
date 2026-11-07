@@ -1,5 +1,5 @@
---- /dev/null	Sat Nov  7 19:36:25 2026
-+++ net/if_awg.h	Sat Nov  7 19:36:25 2026
+--- /dev/null	Sat Nov  7 20:13:39 2026
++++ net/if_awg.h	Sat Nov  7 20:13:39 2026
 @@ -0,0 +1,174 @@
 +/*	$OpenBSD: if_awg.h,v 1.1 2026/09/24 00:00:00 truebad0ur Exp $ */
 +
@@ -176,9 +176,9 @@
 +
 +#endif /* __IF_AWG_H__ */
 
---- /dev/null	Sat Nov  7 19:36:25 2026
-+++ net/if_awg.c	Sat Nov  7 19:36:25 2026
-@@ -0,0 +1,3945 @@
+--- /dev/null	Sat Nov  7 20:13:39 2026
++++ net/if_awg.c	Sat Nov  7 20:13:39 2026
+@@ -0,0 +1,3953 @@
 +/*	$OpenBSD: if_awg.c,v 1.2 2026/10/20 00:00:00 truebad0ur Exp $ */
 +
 +/*
@@ -3352,9 +3352,13 @@
 +	sc->sc_awg_disable_cookies = 0;
 +	awg_update_noise_timings(sc);
 +
++	/*
++	 * The caller hands in a zeroed array and owns the entries afterwards;
++	 * freeing here would free whatever the caller's stack happened to hold
++	 * (a bad free of a stack address panics in free(9)).
++	 */
 +	rw_enter_write(&sc->sc_ispec_lock);
 +	for (i = 0; i < AWG_ISPEC_COUNT; i++) {
-+		awg_ispec_free(&old[i]);
 +		old[i] = sc->sc_awg_ispec[i];
 +		bzero(&sc->sc_awg_ispec[i], sizeof(sc->sc_awg_ispec[i]));
 +	}
@@ -3561,8 +3565,12 @@
 +			 * I1-I5 into the array it is handed. That must not be
 +			 * the freshly parsed ispec[]: it would free the new
 +			 * values and hand the old ones back to the install
-+			 * loop below, resurrecting them.
++			 * loop below, resurrecting them. The array is zeroed
++			 * first: the reset only moves ownership, so an
++			 * uninitialised stack array would be freed as if it
++			 * held ispecs.
 +			 */
++			bzero(dropped, sizeof(dropped));
 +			awg_reset_3_1(sc, dropped);
 +			for (i = 0; i < AWG_ISPEC_COUNT; i++)
 +				awg_ispec_free(&dropped[i]);
@@ -4125,8 +4133,8 @@
 +			IPL_NET, 0, "awgratelimit", NULL);
 +}
 
---- /dev/null	Sat Nov  7 19:36:25 2026
-+++ net/awg_noise.h	Sat Nov  7 19:36:25 2026
+--- /dev/null	Sat Nov  7 20:13:39 2026
++++ net/awg_noise.h	Sat Nov  7 20:13:39 2026
 @@ -0,0 +1,215 @@
 +/*	$OpenBSD: awg_noise.h,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -4344,8 +4352,8 @@
 +
 +#endif /* __AWG_NOISE_H__ */
 
---- /dev/null	Sat Nov  7 19:36:25 2026
-+++ net/awg_noise.c	Sat Nov  7 19:36:25 2026
+--- /dev/null	Sat Nov  7 20:13:39 2026
++++ net/awg_noise.c	Sat Nov  7 20:13:39 2026
 @@ -0,0 +1,1405 @@
 +/*	$OpenBSD: awg_noise.c,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*

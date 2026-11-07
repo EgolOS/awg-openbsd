@@ -29,10 +29,21 @@ client for interoperability.
 
 ## Negative tests (must not panic)
 
-`tools/lab/smoke-test.sh` runs this list inside the VM and prints PASS/FAIL per
-case, so it is the gate this matrix refers to: `doas sh tools/lab/smoke-test.sh`.
-These are the cases that produced `panic: m_clget: request for 65807 byte
-cluster` before the bounds were added.
+Four scripts, all run by `make check-vm` (or individually as root inside the VM).
+Each prints PASS/FAIL per case and exits non-zero on the first failing class, so
+they are the gate this matrix refers to.
+
+| Script | What it covers |
+|---|---|
+| `tools/lab/smoke-test.sh` | lifecycle, key handling, one obfuscated handshake, malformed datagrams, 3.1 round-trip |
+| `tools/lab/wire-test.sh` | receive path against zero-length, short, oversized (65 000 B) and structurally wrong datagrams; interface must stay usable |
+| `tools/lab/matrix-test.sh` | every parameter at its bound, plus the interdependent rules (`jmin>jmax`, `H` range overlap, `S<12` with header protection, `reject <= keepalive+rekey`, `I1` descriptors) |
+| `tools/lab/stress-test.sh` | 200 version switches, parameter churn and peer add/remove while traffic flows |
+
+The malformed-input cases are the ones that produced
+`panic: m_clget: request for 65807 byte cluster` before the bounds were added,
+and a `panic: free: non-malloced addr ... type devbuf` in `awg_reset_3_1()`
+(now `AWG-030` in `docs/SECURITY-AUDIT.md`).
 
 | Input | Expected |
 |---|---|
@@ -43,9 +54,12 @@ cluster` before the bounds were added.
 | `I1 = <r 65507>` | packet skipped, nothing fragmented |
 | peer sends a 65 000-byte transport packet | padding clamped, no panic |
 | truncated/oversized UDP datagrams to the port | dropped, no crash |
+| `awgversion 3.1` … `awgversion legacy` with `I1` set | returns to legacy, no bad free |
 
 Record the console output: booting with a serial console attached
-(`-serial file:...`) is what makes a panic legible after the fact.
+(`tools/lab/start_vm.sh` writes `serial-<name>.log`) is what makes a panic
+legible after the fact. A panic leaves the guest at the `ddb>` prompt, where
+`show panic` and `trace` name the function that failed.
 
 ## Reproducing the panic (fixed)
 

@@ -22,14 +22,16 @@ LAN_A ?= 192.168.99.1
 LAN_B ?= 192.168.99.2
 TREE        ?= /usr/src/sys
 
-SSH  = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -o ConnectTimeout=10 -i $(LAB_SSH_KEY) -p $(LAB_VM_PORT)
-SCP  = scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-       -i $(LAB_SSH_KEY) -P $(LAB_VM_PORT)
+LAB_KNOWN_HOSTS ?= $(HOME)/.hermes/cache/scratch/awg-lab/known_hosts
+SSH_OPTS = -o BatchMode=yes -o StrictHostKeyChecking=yes \
+           -o UserKnownHostsFile="$(LAB_KNOWN_HOSTS)" \
+           -o ConnectTimeout=10 -i "$(LAB_SSH_KEY)"
+SSH  = ssh $(SSH_OPTS) -p $(LAB_VM_PORT)
+SCP  = scp $(SSH_OPTS) -P $(LAB_VM_PORT)
 
-.PHONY: check check-syntax check-py check-scan check-patch check-vm check-interop baseline manifest clean
+.PHONY: check check-syntax check-py check-tests check-scan check-patch check-vm check-interop baseline manifest clean
 
-check: check-syntax check-py check-scan check-patch
+check: check-syntax check-py check-tests check-scan check-patch
 	@echo "repository checks: OK"
 
 # awg-quick is bash (arrays, [[ ]]); install.sh and the lab scripts are POSIX
@@ -37,15 +39,19 @@ check: check-syntax check-py check-scan check-patch
 # rejects bash syntax, so `sh -n sbin/awg-quick` fails on a correct script.
 check-syntax:
 	@sh -n install.sh
+	@sh -n tools/gen-config.sh
+	@sh -n tools/verify-release.sh
 	@bash -n sbin/awg-quick
 	@for f in tools/lab/*.sh; do sh -n "$$f" || exit 1; done
 	@echo "shell syntax: OK"
 
 check-py:
-	@$(PYTHON) -m py_compile tools/publish-scan.py tools/sync-check.py \
-	    tools/upstream-diff.py tools/lab/install_vm.py
+	@$(PYTHON) -m py_compile tools/*.py tools/lab/*.py tools/tests/*.py
 	@rm -rf tools/__pycache__ tools/lab/__pycache__
 	@echo "python: OK"
+
+check-tests:
+	@$(PYTHON) -m unittest discover -s tools/tests -v
 
 check-scan:
 	@$(PYTHON) tools/publish-scan.py --self-test
@@ -57,6 +63,7 @@ check-patch:
 	@echo "generated patch: current"
 
 check-vm:
+	@test "$(AWG_LAB_DISPOSABLE)" = 1 || { echo "set AWG_LAB_DISPOSABLE=1 for disposable lab VMs" >&2; exit 1; }
 	@for t in smoke-test wire-test matrix-test stress-test; do \
 	    echo "== $$t"; \
 	    $(SCP) -q tools/lab/$$t.sh \
@@ -70,16 +77,15 @@ check-vm:
 # Needs two VMs running the AWG kernel with vio1 configured (tools/lab/README.md).
 # Both sides run the commands through `doas sh -s` so the test can pipe a
 # script over ssh instead of quoting it through make, ssh and doas.
-SSH_OPTS = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-           -o ConnectTimeout=10 -i $(LAB_SSH_KEY)
 A_SSH ?= ssh $(SSH_OPTS) -p $(LAB_VM_PORT) $(LAB_VM_USER)@$(LAB_VM_HOST) doas sh -s
 B_SSH ?= ssh $(SSH_OPTS) -p $(LAB_VM_PORT_B) $(LAB_VM_USER)@$(LAB_VM_HOST) doas sh -s
 check-interop:
+	@test "$(AWG_LAB_DISPOSABLE)" = 1 || { echo "set AWG_LAB_DISPOSABLE=1 for disposable lab VMs" >&2; exit 1; }
 	@A_SSH='$(A_SSH)' B_SSH='$(B_SSH)' \
 	    LAN_A=$(LAN_A) LAN_B=$(LAN_B) sh tools/lab/interop-test.sh
 
 baseline:
-	@$(PYTHON) tools/upstream-diff.py --tree $(TREE)
+	@$(PYTHON) tools/upstream-diff.py --tree "$(TREE)"
 
 # Release metadata for a built kernel: hashes, versions, test results.
 #   make manifest KERNEL=/usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd \

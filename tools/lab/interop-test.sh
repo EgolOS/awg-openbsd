@@ -12,6 +12,14 @@
 #
 # Everything it creates is torn down, including on failure.
 set -u
+# This script configures and destroys lab interfaces. Never infer consent
+# from an SSH target or run destructive tests on a general-purpose server.
+[ "${AWG_LAB_DISPOSABLE:-0}" = 1 ] || {
+	echo 'FAIL: set AWG_LAB_DISPOSABLE=1 only for disposable lab VMs' >&2; exit 1;
+}
+[ -n "${B_SSH:-}" ] || { echo 'FAIL: B_SSH is required' >&2; exit 1; }
+CREATED_A=0 CREATED_B=0
+DIR_A= DIR_B=
 
 A_SSH=${A_SSH:-}
 B_SSH=${B_SSH:-}
@@ -27,31 +35,40 @@ pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=$((FAILED + 1)); }
 
 # rsh <side> <command>: run a command on A or B.
+# A_SSH/B_SSH are trusted operator shell commands, never config/peer input.
 # The command goes over stdin to a remote `sh -s`, so quoting is parsed exactly
 # once (by the remote shell) instead of being mangled by ssh + doas + make.
 rsh() {
 	side=$1; shift
 	case "$side" in
-	A) printf '%s\n' "$*" | ${A_SSH:-sh} ;;
-	B) printf '%s\n' "$*" | ${B_SSH:-sh} ;;
+	A) printf '%s\n' "$*" | sh -c "${A_SSH:-sh}" ;;
+	B) printf '%s\n' "$*" | sh -c "${B_SSH:-sh}" ;;
 	esac
 }
 
 cleanup() {
-	rsh A 'ifconfig awg0 destroy' >/dev/null 2>&1
-	rsh B 'ifconfig awg0 destroy' >/dev/null 2>&1
-	# pf stays disabled on purpose: re-enabling it loads the stock "block
-	# return all" ruleset, which kills the ssh session this script runs over.
-	# Turn it back on yourself: doas pfctl -e
+	[ "$CREATED_A" = 0 ] || rsh A 'ifconfig awg0 destroy' >/dev/null 2>&1
+	[ "$CREATED_B" = 0 ] || rsh B 'ifconfig awg0 destroy' >/dev/null 2>&1
+	for side in A B; do
+		if [ "$side" = A ]; then dir=$DIR_A; else dir=$DIR_B; fi
+		case "$dir" in
+		/var/tmp/awg-interop.*)
+			rsh "$side" "if [ -f '$dir/pid' ]; then kill \$(cat '$dir/pid') 2>/dev/null || true; fi; rm -rf '$dir'" >/dev/null 2>&1 ;;
+		esac
+	done
 }
 trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
-# The stock pf.conf passes TCP only ("block return all" + "pass all flags
-# S/SA"), so ICMP and the tunnel's UDP would be dropped before the driver sees
-# them. A lab VM is not a firewall test: disable pf for the duration and turn
-# it back on in cleanup. Never do this on a server.
-rsh A 'pfctl -d' >/dev/null 2>&1
-rsh B 'pfctl -d' >/dev/null 2>&1
+# Never change firewall policy implicitly. Operators prepare isolated guests.
+for side in A B; do
+	rsh "$side" 'pfctl -si' | grep -q '^Status: Disabled' || {
+		fail "$side: PF must already be disabled in the disposable lab"; exit 1;
+	}
+	if rsh "$side" 'ifconfig awg0 >/dev/null 2>&1'; then
+		fail "$side: awg0 already exists; refusing to replace it"; exit 1
+	fi
+done
 
 # Public keys must match the private keys above; deriving them needs the
 # userspace helper, so the test takes them from the same place awg-quick does.
@@ -61,10 +78,10 @@ derived() {		# derived <side> <private-key>
 }
 
 echo "== 1. configure both ends"
-rsh A "ifconfig awg0 destroy" >/dev/null 2>&1
-rsh B "ifconfig awg0 destroy" >/dev/null 2>&1
-rsh A "ifconfig awg0 create" || fail "A: create awg0"
-rsh B "ifconfig awg0 create" || fail "B: create awg0"
+rsh A "ifconfig awg0 create" || { fail "A: create awg0"; exit 1; }
+CREATED_A=1
+rsh B "ifconfig awg0 create" || { fail "B: create awg0"; exit 1; }
+CREATED_B=1
 rsh A "ifconfig awg0 awgkey $KEY_A" || fail "A: set key"
 rsh B "ifconfig awg0 awgkey $KEY_B" || fail "B: set key"
 
@@ -113,23 +130,36 @@ else
 fi
 
 echo "== 4. bulk transfer through the tunnel"
-# B listens, A sends 8 MiB of zeros, both timed on A.
-rsh B "nc -l -p 5201 > /dev/null 2>&1 </dev/null &
-sleep 1" >/dev/null 2>&1 </dev/null
+# Verify both the sender status and actual receiver bytes/digest. Elapsed
+# seconds alone is neither successful delivery nor a throughput benchmark.
+DIR_A=$(rsh A 'umask 077; mktemp -d /var/tmp/awg-interop.XXXXXXXX') || exit 1
+DIR_B=$(rsh B 'umask 077; mktemp -d /var/tmp/awg-interop.XXXXXXXX') || exit 1
+for dir in "$DIR_A" "$DIR_B"; do
+	case "$dir" in /var/tmp/awg-interop.*) ;; *) fail 'invalid remote work directory'; exit 1 ;; esac
+done
+rsh A "dd if=/dev/zero of='$DIR_A/send' bs=65536 count=128 2>/dev/null" || {
+	fail 'could not create transfer fixture'; exit 1;
+}
+rsh B "nohup nc -d -l $TUN_B 5201 > '$DIR_B/received' 2>'$DIR_B/error' </dev/null & echo \$! > '$DIR_B/pid'" || exit 1
 sleep 1
 start=$(date +%s)
-if rsh A "dd if=/dev/zero bs=65536 count=128 2>/dev/null | nc -N -w 5 $TUN_B 5201"; then
-	:
-fi
-end=$(date +%s)
-secs=$((end - start))
-[ "$secs" -eq 0 ] && secs=1
-rsh B "pkill -f 'nc -l -p 5201'" >/dev/null 2>&1
-rate=$((8 * 1024 / secs / 1024))
-if [ "$secs" -le 30 ]; then
-	pass "8 MiB through the tunnel in ${secs}s (~${rate} MiB/s, unscientific: nc + dd)"
+if rsh A "nc -N -w 10 $TUN_B 5201 < '$DIR_A/send'"; then
+	i=0
+	while [ "$i" -lt 15 ]; do
+		count=$(rsh B "wc -c < '$DIR_B/received'" | tr -d ' \n')
+		[ "$count" = 8388608 ] && break
+		i=$((i + 1)); sleep 1
+	done
+	count=$(rsh B "wc -c < '$DIR_B/received'" | tr -d ' \n')
+	digest=$(rsh B "sha256 -q '$DIR_B/received'")
+	if [ "$count" = 8388608 ] &&
+	    [ "$digest" = 2daeb1f36095b44b318410b3f4e8b5d989dcc7bb023d1426c492dab0a3053e74 ]; then
+		pass "8 MiB received with matching SHA256 ($(( $(date +%s) - start ))s; not a benchmark)"
+	else
+		fail "bulk transfer receiver status/length/digest mismatch"
+	fi
 else
-	fail "bulk transfer took ${secs}s"
+	fail 'bulk transfer sender failed'
 fi
 
 echo "== 5. counters moved"
@@ -137,12 +167,8 @@ tx_a=$(rsh A "ifconfig awg0 | sed -n 's/.*tx: \\([0-9]*\\).*/\\1/p' | head -1")
 [ -n "$tx_a" ] && [ "$tx_a" -gt 0 ] && pass "A transmit counter: $tx_a bytes" || \
     fail "A transmit counter did not move"
 
-# The listener's ssh session would otherwise keep the pipe open and hold the
-# caller (make) after the report is printed.
-rsh B "pkill -f 'nc -l -p 5201'" >/dev/null 2>&1 </dev/null
-
 echo
-echo "note: pf stays disabled on both VMs (enabling it drops this ssh session)"
+echo "note: PF configuration was not changed"
 if [ "$FAILED" -eq 0 ]; then
 	echo "RESULT: interop passed"
 	exit 0

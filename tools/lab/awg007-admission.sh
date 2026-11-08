@@ -28,10 +28,10 @@ ifconfig awg7 awgport 51931 awgversion 3.1 awgs1 26 awgs2 33 awgs3 18 awgs4 24 \
     awgh1 100 awgh2 200 awgh3 300 awgh4 400 awgdisablecookies 1
 P4=$(ifconfig awg6 | sed -n 's/.*awgpubkey //p')
 P5=$(ifconfig awg7 | sed -n 's/.*awgpubkey //p')
-ifconfig awg6 inet 10.96.0.1/32 up
-ifconfig awg7 inet 10.96.0.2/32 up
-ifconfig awg6 awgpeer "$P5" awgaip 10.96.0.2/32 awgendpoint 127.0.0.1 51931 awgpka 5
-ifconfig awg7 awgpeer "$P4" awgaip 10.96.0.1/32 awgendpoint 127.0.0.1 51930
+ifconfig awg6 inet 10.96.0.1/32 up  # scan:allow-fixture: RFC1918 lab address
+ifconfig awg7 inet 10.96.0.2/32 up  # scan:allow-fixture: RFC1918 lab address
+ifconfig awg6 awgpeer "$P5" awgaip 10.96.0.2/32 awgendpoint 127.0.0.1 51931 awgpka 5  # scan:allow-fixture: RFC1918 lab address
+ifconfig awg7 awgpeer "$P4" awgaip 10.96.0.1/32 awgendpoint 127.0.0.1 51930  # scan:allow-fixture: RFC1918 lab address
 sleep 5
 if ifconfig awg6 | grep -q 'last handshake'; then
 	ok "handshake with DisableCookies on: $(ifconfig awg6 | sed -n 's/.*last handshake: //p')"
@@ -55,8 +55,8 @@ ifconfig awg7 create
 printf '%s\n' "$K5" | ifconfig awg7 awgkey -
 ifconfig awg7 awgport 51931 awgversion 3.1 awgs1 26 awgs2 33 awgs3 18 awgs4 24 \
     awgh1 100 awgh2 200 awgh3 300 awgh4 400 awgdisablecookies 1
-ifconfig awg7 inet 10.96.0.2/32 up
-ifconfig awg7 awgpeer "$P4" awgaip 10.96.0.1/32 awgendpoint 127.0.0.1 51930
+ifconfig awg7 inet 10.96.0.2/32 up  # scan:allow-fixture: RFC1918 lab address
+ifconfig awg7 awgpeer "$P4" awgaip 10.96.0.1/32 awgendpoint 127.0.0.1 51930  # scan:allow-fixture: RFC1918 lab address
 sleep 6
 if ifconfig awg6 | grep -q 'last handshake'; then
 	ok "fresh handshake admitted after the flood: $(ifconfig awg6 | sed -n 's/.*last handshake: //p')"

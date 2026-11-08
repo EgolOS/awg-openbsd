@@ -127,16 +127,44 @@ soak, coverage-guided fuzzing or performance result is claimed.
 - Evidence: `run-1/agents/h3-userspace/report.md` (F-C4), `run-1/REPORT.md`
 
 ### AWG-007 — `DisableCookies = on` removes the only pre-handshake gate
-- Severity: medium · State: accepted · Confidence: confirmed against `sys/net/wg_cookie.c`
+- Severity: medium · State: fixed (admission cap) · Confidence: confirmed against `sys/net/wg_cookie.c`
 - Surface: remote, unauthenticated (any host that knows the public key)
 - Affected: all commits through `f43535e`
 - Root cause: `src/if_awg.c:1974-1985` forces `underload = 0` when the flag is set, so
   `cookie_checker_validate_macs()` returns after `mac1` — no cookie, no per-address ratelimit —
   and every queued initiation costs one X25519 (`awg_noise.c:305`) before anything rejects it.
-- Remediation: not fixed — inherent to the AmneziaWG parameter. `SECURITY.md` threat model now
-  spells out the CPU-exhaustion exposure next to the `S1`–`S4` row.
-- Regression test: no automated test (a cookie-off interface under a flood is manual).
-- Evidence: `run-1/agents/k1-kernel/findings.md` (F-K1), `run-1/REPORT.md`
+- Upstream status (checked 2026-11-08): this is a **deliberate upstream decision**, not a porting
+  slip. `amneziawg-go` PR #188 ("fix: disable the whole underload if DisableCookies is on") was
+  merged to do exactly this, and the review comment states the trade-off: it "shifts the
+  vulnerability from a trivial DoS with a short packet spike to a full-blown computational DoS
+  needing at least a 20 Mbit/s per CPU Core". `amneziawg-linux-kernel-module` `src/receive.c:194`
+  computes `under_load = !wg->disable_cookies && ...`, and `wg_cookie_validate_packet()` only
+  reaches its ratelimiter when `check_cookie` is true — same outcome. Our port matches all of them.
+  The public documentation is the part that is now **stale**: it still says `DisableCookies`
+  "disables only the sending of Handshake Cookie Reply messages" and that "other cookie-related
+  mechanisms continue to work the same way".
+- Measured cost on the project lab (OpenBSD 8.0, `curve25519()` from `sys/crypto/curve25519.c`,
+  single core of a Ryzen AI Max+ 395): **43 µs per X25519**, 23 000 ops/s, i.e. one core's worth of
+  work per ~23 000 spoofed 148-byte initiations (~27 Mbit/s) — consistent with the 20 Mbit/s/core
+  figure in the upstream review.
+- Fix (2026-11-08): the cookie-less path is capped at `AWG_HS_ADMIT_RATE` (100) handshake datagrams
+  per second with a `AWG_HS_ADMIT_BURST` (200) burst, applied in `awg_handshake_worker()` before the
+  packet reaches `awg_handshake()`; the excess is freed immediately and counted in `if_ierrors`.
+  The wire format is unchanged and interfaces with cookies enabled (the default) never consult the
+  bucket, so nothing about interoperability or ordinary behaviour moves. A legitimate peer needs a
+  handful of handshakes per rekey interval; at most ~0.5% of a core is spent when the cap binds.
+- Validation: `tools/lab/awg007-admission.sh` on a disposable OpenBSD 8.0 guest (3.1 profile,
+  `awgdisablecookies 1`): handshake completes, then 20 000 initiation-shaped datagrams at ~1000/s
+  produce 18 271 counted drops while the tunnel survives and a fresh handshake is admitted
+  afterwards. The default-mode suite (`make check-vm`, four gates, 102 PASS) still passes on the
+  same kernel.
+- Residual: this is a per-interface limit, not per-source; a flood can still delay a legitimate
+  handshake, and it does not restore return-routability. Raising the rate is a one-line change for
+  deployments with many peers.
+- Regression test: `tools/lab/awg007-admission.sh` (manual, disposable lab).
+- Evidence: `run-1/agents/k1-kernel/findings.md` (F-K1), `run-1/REPORT.md`;
+  upstream `amneziawg-go` #188, `amneziawg-linux-kernel-module` `src/receive.c:194`,
+  `src/cookie.c` `wg_cookie_validate_packet()`; microbenchmark numbers above.
 
 ### AWG-008 — Timing cross-check uses `r_hi` and is skipped across separate ioctls
 - Severity: medium · State: fixed · Confidence: confirmed

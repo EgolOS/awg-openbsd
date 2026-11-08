@@ -70,6 +70,13 @@ they are the gate this matrix refers to.
 | `tools/lab/stress-test.sh` | 200 version switches, parameter churn and peer add/remove while traffic flows |
 | `tools/lab/interop-test.sh` | **two VMs**: 3.1 handshake over a real link, ICMP through the tunnel, 8 MiB bulk transfer, counters |
 
+`tools/lab/awg007-admission.sh` is a manual gate, not part of `make check-vm`:
+it floods a cookie-less 3.1 interface with initiation-shaped datagrams and
+asserts that the admission cap counts the excess as input errors, that the
+tunnel survives, and that a fresh handshake is still admitted afterwards. It
+needs `AWG_LAB_DISPOSABLE=1` and a disposable guest (it builds `hsflood.c` next
+to itself); 20 000 datagrams take about 20 s.
+
 `make check-interop` drives the two-VM test from the host (`A_SSH`, `B_SSH`,
 `LAN_A`, `LAN_B`). It is not part of `make check-vm`: it needs `obsd-b` running
 the AWG kernel and both VMs on the lab LAN (`vio1`, 192.168.99.0/24).

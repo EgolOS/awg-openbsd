@@ -8,6 +8,16 @@ tested as a unit.
 Findings are numbered (`AWG-0xx`) and tracked with state and regression test in
 [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
+## [Unreleased]
+
+### Security
+
+- `AWG-007` (cookie-less handshake flood): an interface with `DisableCookies`
+  set now admits at most `AWG_HS_ADMIT_RATE` handshake datagrams per second
+  (burst `AWG_HS_ADMIT_BURST`) before the X25519, counting the rest as input
+  errors. Wire format unchanged; interfaces with cookies enabled are untouched.
+  Rationale and measurements are in `docs/SECURITY-AUDIT.md` (AWG-007).
+
 ## [0.2.0] — 2026-11-07
 
 Security hardening, a real test gate, install rollback, and the documentation

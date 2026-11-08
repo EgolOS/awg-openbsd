@@ -1,0 +1,11 @@
+ifconfig: SIOCAIFADDR: File exists
+ifconfig: SIOCAIFADDR: File exists
+ok: handshake with DisableCookies on: 0 seconds ago
+ierrors before: 0
+--- sustained flood: 20000 initiations at ~2000/s ---
+offered=20000 len=174 secs=20.000 pps=1000 busy_drops=0
+ierrors after : 18271 (dropped 18271)
+ok: admission cap dropped 18271 of 20000
+ifconfig: SIOCAIFADDR: File exists
+ok: fresh handshake admitted after the flood: 29 seconds ago
+== result: 3 passed, 0 failed

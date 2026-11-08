@@ -24,11 +24,15 @@ What the driver does **not** protect against:
   config value is now validated, but a hostile root is out of scope.
 - **`DisableCookies = on` removes the pre-handshake gate.** With cookies
   enabled, a sender must answer a cookie challenge and is rate limited per
-  address *before* the X25519 in `consume_initiation`; with it off, every
-  queued initiation costs one X25519 and only the bounded handshake queue
-  (`MAX_QUEUED_HANDSHAKES`) limits the work. Expect remote CPU load and
-  starvation of legitimate handshakes while a flood runs; leave cookies on
-  unless the peer implementation requires otherwise.
+  address *before* the X25519 in `consume_initiation`. With it off — the
+  behaviour all AmneziaWG implementations share (`amneziawg-go` #188, Linux
+  module `receive.c`) — nothing else bounds that work, and one X25519 costs
+  ~43 us on a current core, so roughly 20-30 Mbit/s of initiation-shaped
+  datagrams is a core. This driver therefore caps the cookie-less handshake
+  path at `AWG_HS_ADMIT_RATE` datagrams per second (burst
+  `AWG_HS_ADMIT_BURST`) and counts the excess as input errors. Under a flood
+  legitimate handshakes can still be delayed; leave cookies on unless the peer
+  implementation requires otherwise.
 - **Traffic analysis.** Obfuscation changes the wire format, not the timing
   or volume of traffic.
 

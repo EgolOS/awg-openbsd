@@ -84,6 +84,21 @@
 #define AWG_MAX_PADDING		1280	/* S1-S4/S3/S4 upper bound (min IPv6 MTU) */
 #define AWG_MAX_JUNK		64	/* Jc upper bound; upstream recommends 4-12 */
 #define AWG_MAX_JUNK_SIZE	1500	/* junk packets are built in a 1500-byte buffer */
+/*
+ * Admission limit for interfaces with DisableCookies set (AWG-007).
+ *
+ * With cookies enabled, an initiation is answered with a cookie challenge
+ * before the responder spends an X25519 on it, so a flood is bounded by
+ * return-routability. With DisableCookies the whole under-load path is off
+ * (this matches amneziawg-go #188 and the Linux module), which leaves the
+ * curve operation as the only per-datagram cost: ~43 us per X25519 on a
+ * current core, i.e. one core per ~23k spoofed initiations per second.
+ * Processing at most AWG_HS_ADMIT_RATE handshake datagrams per second keeps
+ * that work bounded whatever arrives; the bucket is only consulted in
+ * cookie-less mode, so ordinary interfaces behave exactly as before.
+ */
+#define AWG_HS_ADMIT_RATE	100	/* handshake datagrams per second */
+#define AWG_HS_ADMIT_BURST	200	/* tokens a quiet interface holds */
 #define AWG_MAX_UDP_PAYLOAD	65507
 
 #define AWGPRINTF(loglevel, sc, mtx, fmt, ...) do {		\
@@ -350,6 +365,10 @@ struct awg_softc {
 	struct awg_range	 sc_awg_max_handshake_attempts;
 	int			 sc_awg_random_trailers;
 	int			 sc_awg_disable_cookies;
+	/* Token bucket for the cookie-less handshake path; only touched by
+	 * awg_handshake_worker(), which is serialised by its taskqueue. */
+	uint32_t		 sc_hs_tokens;
+	struct timeval		 sc_hs_refill;
 
 	struct rwlock		 sc_ispec_lock;
 	struct awg_ispec	 sc_awg_ispec[AWG_ISPEC_COUNT];
@@ -2140,13 +2159,54 @@ error:
 	m_freem(m);
 }
 
+/*
+ * Token bucket guarding the handshake path of a cookie-less interface.
+ * Returns 1 when the datagram may be processed, 0 when it must be dropped.
+ * Runs in awg_handshake_worker(), which the taskqueue serialises, so no lock
+ * is needed; the sentinel refill of 0 means "bucket full, start counting".
+ */
+static int
+awg_hs_admit(struct awg_softc *sc)
+{
+	struct timeval	 now, delta;
+	int64_t		 add;
+	int		 ok = 1;
+
+	getmicrouptime(&now);
+	if (sc->sc_hs_refill.tv_sec == 0) {
+		sc->sc_hs_tokens = AWG_HS_ADMIT_BURST;
+		sc->sc_hs_refill = now;
+	}
+	timersub(&now, &sc->sc_hs_refill, &delta);
+	add = (int64_t)delta.tv_sec * AWG_HS_ADMIT_RATE +
+	    (int64_t)delta.tv_usec * AWG_HS_ADMIT_RATE / 1000000;
+	if (add > 0) {
+		sc->sc_hs_tokens += add;
+		if (sc->sc_hs_tokens > AWG_HS_ADMIT_BURST)
+			sc->sc_hs_tokens = AWG_HS_ADMIT_BURST;
+		sc->sc_hs_refill = now;
+	}
+	if (sc->sc_hs_tokens != 0)
+		sc->sc_hs_tokens--;
+	else
+		ok = 0;
+	return ok;
+}
+
 void
 awg_handshake_worker(void *_sc)
 {
 	struct mbuf *m;
 	struct awg_softc *sc = _sc;
-	while ((m = mq_dequeue(&sc->sc_handshake_queue)) != NULL)
+	while ((m = mq_dequeue(&sc->sc_handshake_queue)) != NULL) {
+		if (sc->sc_awg_disable_cookies && !awg_hs_admit(sc)) {
+			/* Cheap drop, before the curve operation (AWG-007). */
+			sc->sc_if.if_ierrors++;
+			m_freem(m);
+			continue;
+		}
 		awg_handshake(sc, m);
+	}
 }
 
 /*
@@ -3169,6 +3229,8 @@ awg_reset_3_1(struct awg_softc *sc, struct awg_ispec old[AWG_ISPEC_COUNT])
 	bzero(&sc->sc_awg_max_handshake_attempts, sizeof(struct awg_range));
 	sc->sc_awg_random_trailers = 0;
 	sc->sc_awg_disable_cookies = 0;
+	sc->sc_hs_tokens = 0;
+	bzero(&sc->sc_hs_refill, sizeof(sc->sc_hs_refill));
 	awg_update_noise_timings(sc);
 
 	/*
@@ -3438,8 +3500,16 @@ next_peer:
 	awg_update_noise_timings(sc);
 	if (iface_o.i_flags & AWG_INTERFACE_HAS_TRAILERS)
 		sc->sc_awg_random_trailers = iface_o.i_random_trailers != 0;
-	if (iface_o.i_flags & AWG_INTERFACE_HAS_COOKIES)
+	if (iface_o.i_flags & AWG_INTERFACE_HAS_COOKIES) {
+		int was = sc->sc_awg_disable_cookies;
+
 		sc->sc_awg_disable_cookies = iface_o.i_disable_cookies != 0;
+		if (!was && sc->sc_awg_disable_cookies) {
+			/* Start the cookie-less admission bucket full. */
+			sc->sc_hs_tokens = 0;
+			bzero(&sc->sc_hs_refill, sizeof(sc->sc_hs_refill));
+		}
+	}
 	for (i = 0; i < AWG_ISPEC_COUNT; i++) {
 		struct awg_ispec tmp;
 

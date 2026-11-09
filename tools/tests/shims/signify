@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+import hashlib,sys
+a=sys.argv
+sig=open(a[a.index("-x")+1]).read().split()
+want=dict()
+for i in range(0,len(sig),2):
+    want[sig[i]]=sig[i+1]
+name=a[-1]
+h=hashlib.sha256(open(name,"rb").read()).hexdigest()
+sys.exit(0 if want.get(name)==h else 1)

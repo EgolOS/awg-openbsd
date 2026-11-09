@@ -1,0 +1,3 @@
+#!/bin/sh
+mkdir -p ../compile/AWG.MP
+exit 0

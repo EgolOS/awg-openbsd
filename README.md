@@ -34,7 +34,7 @@ On a disposable OpenBSD 8.0 amd64 lab, after reviewing the recovery runbook:
 doas pkg_add git bash
 git clone https://github.com/EgolOS/awg-openbsd
 cd awg-openbsd
-doas sh install.sh --all     # kernel + ifconfig + awg-quick, 35-50 min on 1 vCPU
+doas sh install.sh --all     # kernel + patched ifconfig + header + awgctl (+ awgctl.8) + awg-quick, 35-50 min on 1 vCPU
 doas reboot
 uname -v                     # AWG.MP#<n>
 doas sh tools/gen-config.sh --endpoint vpn.example.com:51820
@@ -62,6 +62,7 @@ for how they are tested. The upstream pull request is
 | `src/awg_noise.c`, `src/awg_noise.h` | Copy of `wg_noise` with configurable `RekeyAfterTime`/`RejectAfterTime` |
 | `src/AWG.MP` | Kernel config (`include GENERIC.MP` + `pseudo-device awg`) |
 | `sbin/ifconfig/ifconfig_awg.patch` | Patch for `/sbin/ifconfig` to add `awg*` flags |
+| `sbin/awgctl/awgctl.c` | Management tool built and installed with the pair (`SIOCSAWG`/`SIOCGAWG`) |
 | `sbin/awg-quick` | Shell script to bring tunnels up/down from a config file |
 | `install.sh` | Build and install script |
 
@@ -80,14 +81,15 @@ Interfaces are named `awg0`, `awg1`, … Configs live in `/etc/amnezia/amneziawg
 git clone https://github.com/EgolOS/awg-openbsd
 cd awg-openbsd
 
-# 1. Patch ifconfig + install awg-quick (fast, no reboot)
+# 1. Patch ifconfig + install awg-quick (fast, no reboot; no awgctl)
 doas sh install.sh --tools-only
 
-# 2. Build and install the AWG kernel (15 min on a fast machine,
-#    35-50 min on a 1 vCPU VPS; requires reboot)
+# 2. Build and install the AWG kernel + header (15 min on a fast machine,
+#    35-50 min on a 1 vCPU VPS; requires reboot; no awgctl)
 doas sh install.sh --kernel-only
 
-# Or do both in one shot:
+# Or do everything in one shot (kernel + patched ifconfig + header +
+# awgctl with its awgctl.8 manpage + awg-quick):
 doas sh install.sh --all
 ```
 
@@ -428,7 +430,7 @@ Optional HP keystream KAT: `OPENBSD_SYS_TREE=/verified/sys make check-tests`.
 
 | Command | What it proves |
 | --- | --- |
-| `make check` | syntax, Python compile, offline security regressions, publish scan, generated patch freshness; signature fixture skips explicitly if signify is absent |
+| `make check` | syntax, Python compile, offline security regressions, the compiled-C integration gate plus its fail-closed sensitivity campaign (`make check-cgate` → `tools/lab/gate-controls.py`, 1 green + 26 negative controls, and `tools/lab/oracle-controls.sh` C1–C24), publish scan, generated patch freshness; signature fixture skips explicitly if signify is absent |
 | `make check-vm` | four gates in one VM: `smoke-test` (lifecycle, handshake, malformed input), `wire-test`, `matrix-test` (every parameter at its bound), `stress-test` (200 version switches under traffic) |
 | `make check-interop` | two VMs, real link: 3.1 handshake, ICMP through the tunnel, 8 MiB transfer, counters |
 | `make baseline TREE=/usr/src/sys` | function-level divergence against a stock OpenBSD tree, checked against the recorded baseline |
@@ -441,7 +443,7 @@ Design and maintenance documents:
 - [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) — findings register: what was found, what is fixed, which test proves it
 - [`docs/LOCKING.md`](docs/LOCKING.md) — lock inventory, what a torn obfuscation read can do, the H1–H4 decision
 - [`docs/RUNBOOK-security-updates.md`](docs/RUNBOOK-security-updates.md) — what `syspatch` does to a custom kernel and how to rebuild
-- [`docs/ADMIN-INTERFACE.md`](docs/ADMIN-INTERFACE.md) — why the `ifconfig` patch stays and `awgctl` is not built
+- [`docs/ADMIN-INTERFACE.md`](docs/ADMIN-INTERFACE.md) — why the `ifconfig` patch stays primary and `awgctl` ships alongside it
 
 ## Upstream
 

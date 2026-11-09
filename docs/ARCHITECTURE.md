@@ -268,6 +268,24 @@ layout changes (`src/if_awg.h:34-38`).
   `awg_status()` which issues the `SIOCGAWG` size-probe loop. Keys accept `-`
   to read base64 from stdin (`AWG_LOAD_KEY` macro) so the private key need
   not sit in the argument vector.
+- **Pledge group** (`sys/kern/kern_pledge.c`): stock OpenBSD names neither
+  `SIOCSAWG` (223) nor `SIOCGAWG` (224) in the `PLEDGE_INET` ioctl switch, so
+  `sys_ioctl(2)` charges both against `PLEDGE_TTY` and a pledged binary is
+  SIGABRTed on the first ioctl. The hunk adds both cases (plus
+  `#include <net/if_awg.h>` for the constants) and is part of the kernel side:
+  `generate-patch.sh` emits it from `src/kern_pledge.c.orig` →
+  `src/kern_pledge.c` so `awg-openbsd.patch` carries it, and
+  `install.sh:install_pledge_hunk` applies it before `config AWG.MP`
+  (idempotent, baseline-verified against `tools/upstream/<ver>.sha256`).
+  Without it `awgctl` cannot pledge (docs/SECURITY-AUDIT.md AWG-038).
+- **`sbin/awgctl`** (standalone management tool, Option B): one
+  `awg_data_io` per command. `up` serialises the whole `[Peer]` list with
+  `i_peers_count` set and `AWG_INTERFACE_REPLACE_PEERS`, so the file is
+  authoritative for the peer set; `set` reads the current state with
+  `SIOCGAWG` first so a partial command keeps the siblings of the grouped
+  fields (Jc/Jmin/Jmax, S1/S2, H1–H4); `add`/`del` carry one peer. Key
+  material comes from the config file, from argv, or from stdin with `-`.
+  Interface create/destroy shells out to stock `ifconfig(8)` (SIOCIFCREATE2).
 - **`sbin/awg-quick`** (832 lines, bash; installed to
   `/usr/local/sbin/awg-quick` by `install.sh`) parses an AmneziaWG `.conf`
   (`[Interface]` incl. all AWG/3.1 keys, `[Peer]` incl. multiple peers),

@@ -104,7 +104,7 @@ PASS: s1-s4 12 with a key  # scan:allow-fixture
 PASS: s4 11 with a key  # scan:allow-fixture
 PASS: key cleared, short prefixes accepted again  # scan:allow-fixture
 == 5. timings: bounds, ordering, and reject > keepalive + rekey
-PASS: awgrekeyaftertime 65535  # scan:allow-fixture
+PASS: awgrekeyaftertime 65535  # scan:allow-fixture[sha1:48d6b8b8eaad05254afdacd08948ff86f6824988,sha1:632748677f2905b7c24cd3044c6b03dccbaef443,sha1:d2448748e106fc838379ae28f15f816fabf467da,sha1:d3e1ec24a7dc14c74492dcb9e1987827d540d47e,sha1:e5bbbdead228ff1cee00200ea6847e448d70b881]
 PASS: awgrekeyaftertime 65536 (ifconfig)  # scan:allow-fixture
 PASS: reversed timing range (ifconfig)  # scan:allow-fixture
 PASS: reject 1-2 with pka 10-12 (sum in one call)  # scan:allow-fixture
@@ -138,7 +138,7 @@ PASS: peer and allowed-ip churn survived  # scan:allow-fixture
 == 4. the interface still works afterwards
 PASS: port change accepted  # scan:allow-fixture
 PASS: configuration still readable  # scan:allow-fixture
-PASS: teardown  # scan:allow-fixture
+PASS: teardown  # scan:allow-fixture[sha1:038b051a8219ebf4ef4f65c774b1446616f0c498,sha1:54d87f7847b28929abaf9a30ca93a967ea054ab6,sha1:9b8ab62803aad44cbb4b27de91c0e9b595ad25e4,sha1:b5e50d60f242363c813098b67481969af12cbe57,sha1:b9ffaaf298fda7b83c3aff2d5a91212f0ee20de3]
 
 RESULT: all cases passed
 lab tests: all cases passed

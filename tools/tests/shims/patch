@@ -1,0 +1,3 @@
+#!/bin/sh
+# patch shim: succeed (content is not exercised by these tests).
+exit 0

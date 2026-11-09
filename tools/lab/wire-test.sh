@@ -32,7 +32,7 @@ send() {		# send <description> <bytes>
 ifconfig awg0 >/dev/null 2>&1 && ifconfig awg0 destroy
 ifconfig awg0 create || { echo "cannot create awg0 — kernel has no awg(4)"; exit 1; }
 # A fixed key so the interface is fully initialised; value is a test fixture.
-ifconfig awg0 awgkey AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= # scan:allow-fixture
+ifconfig awg0 awgkey AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE= # scan:allow-fixture[sha1:de49f82911b9d304f1518e8855db8f9cab08b006]
 ifconfig awg0 awgport "$PORT" up || { echo "cannot configure awg0"; exit 1; }
 
 echo "== empty and very short datagrams"

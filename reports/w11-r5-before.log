@@ -1,0 +1,42 @@
+== F1. N2: set on an unchanged 3.1 interface (rc 0, PORT-only write)
+FAIL: F1: unchanged 3.1 set exits 3 (awgctl-fixture: awg9: concurrent update — the interface changed after the read; nothing written)
+FAIL: F1: SIOCSAWG count is 0, expected 1
+FAIL: F1: SIOCSAWG flags are '', expected flags=4
+
+== F2. N2: set on a busy 3.1 interface (counters move between GETs)
+FAIL: F2: busy 3.1 set exits 3 (awgctl-fixture: awg9: concurrent update — the interface changed after the read; nothing written)
+FAIL: F2: SIOCSAWG count is 0, expected 1
+
+== F3. N2: the grouped write keeps the read-back siblings (R4-06 win)
+FAIL: F3: set Jc exits 3
+FAIL: F3: SIOCSAWG flags are '', expected flags=32
+
+== F4. N3: address read-back compares parsed bytes and prefix
+PASS: F4: fd00::1/128 accepted (matches the installed address)
+FAIL: F4: fd00:0:0:0:0:0:0:1/128 rejected (awgctl-fixture: <scratch>/fixture-ifconfig.py: fd00:0:0:0:0:0:0:1/128 not installed on awg9)
+FAIL: F4: FD00::1/128 rejected (awgctl-fixture: <scratch>/fixture-ifconfig.py: FD00::1/128 not installed on awg9)
+FAIL: F4: fd00:000:0:00:0:0:0:1/128 rejected (awgctl-fixture: <scratch>/fixture-ifconfig.py: fd00:000:0:00:0:0:0:1/128 not installed on awg9)
+FAIL: F4: fd00::1/64 accepted although the interface has /128
+PASS: F4: a fresh address installs and reads back
+
+== F5. R4-07: trust walk from the root, O_NOFOLLOW, non-blocking open
+PASS: F5: a plain path under CONF_DIR is accepted
+PASS: F5: world-writable intermediate refused (rc 1)
+PASS: F5: symlinked component refused (rc 1)
+PASS: F5: '.' component refused (rc 1)
+PASS: F5: '..' component refused (rc 1)
+PASS: F5: FIFO in place of the config refused (rc 124)
+
+== F6. R4-09: exact arity, ENOTTY propagation, child signal status
+FAIL: F6: down with a surplus argument exits 0
+PASS: F6: down with exact arity exits 0
+FAIL: F6: show with a surplus argument exits 0
+PASS: F6: show with exact arity exits 0
+FAIL: F6: del with a surplus argument exits 0
+PASS: F6: set on an ENOTTY target exits 3
+F6: (see F7 for the signal case)
+
+== F7. R4-09: EEXIST is only idempotent when the child exited normally
+FAIL: F7: SIGABRT child accepted as idempotence (rc 1, File exists)
+
+RESULT: 15 fixture case(s) failed

@@ -1,0 +1,4 @@
+#!/bin/sh
+# ps shim: the calling process is always alive with a fixed start time.
+if [ "$1" = "-p" ]; then echo 2026-11-08T10:00:00; exit 0; fi
+exec /bin/ps "$@"

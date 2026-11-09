@@ -1,0 +1,34 @@
+#!/bin/sh
+# make shim: record the invocation, answer -V .OBJDIR, and produce the
+# artifacts a real build leaves (obj/ifconfig, obj/bsd). The ifconfig build is
+# proven, not faked: a probe that includes <net/if_awg.h> — the include the
+# AWG patch adds — is compiled with the real compiler using the CPPFLAGS -I
+# the installer passes, so the test sees which header the compiler resolved
+# (R6-N5). AWG_XSTR bakes the header's AWG_KEY_LEN into the object, so the
+# artifact also names *which* header it read (32 = staged, 16 = legacy).
+printf 'make %s\n' "$*" >> "$CMDFILE"
+case "$*" in
+  *-V*.OBJDIR*) echo "$PWD/obj"; exit 0 ;;
+esac
+mkdir -p obj
+inc=""
+for a in "$@"; do
+    case "$a" in
+        CPPFLAGS=-I*) inc="${a#CPPFLAGS=-I}" ;;
+        CPPFLAGS=*)   inc="${a#CPPFLAGS=}" ;;
+    esac
+done
+if [ -n "$inc" ]; then
+    printf '#define AWG_STR(x) #x\n#define AWG_XSTR(x) AWG_STR(x)\n#include <net/if_awg.h>\nconst char *awg_marker = AWG_XSTR(AWG_KEY_LEN);\nint main(void) { return 0; }\n' > obj/probe.c
+    printf 'cc -DIFDESCRSIZE=256 -I%s -S obj/probe.c -o obj/probe.s\n' "$inc" >> "$CMDFILE"
+    cc -DIFDESCRSIZE=256 -I"$inc" -S obj/probe.c -o obj/probe.s 2>> "$CMDFILE" \
+        || { printf 'make: compiler failed for -I%s\n' "$inc" >> "$CMDFILE"; exit 1; }
+fi
+printf '#!/bin/sh\n' > obj/ifconfig
+/bin/chmod 755 obj/ifconfig
+printf 'kernel\n' > obj/bsd
+# The awgctl build (make -C sbin/awgctl) leaves its binary in the source
+# directory, so produce that too.
+printf '#!/bin/sh\n' > awgctl
+chmod 755 awgctl
+exit 0

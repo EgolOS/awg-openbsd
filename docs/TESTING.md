@@ -22,6 +22,15 @@ client for interoperability.
 ## Current executed evidence
 
 See `ENGINEERING-REPORT.md` and `evidence/2026-11-07/` for actual commands/results.
+`make check` also runs the compiled-C integration gate twice through
+`make check-cgate`: once clean (it must report 74 PASS / 0 FAIL) and once with
+I2 rewritten by the fixture (it must fail, naming the changed value). The
+mandatory campaign behind that is `python3 tools/lab/gate-controls.py` — one
+green case plus 26 negative cases, each required to return a nonzero
+`make check-cgate` for its own reason — and `tools/lab/oracle-controls.sh`
+(C1–C24) pins the canonical-comparison semantics. A gate that cannot fail is
+not a gate, so these controls are part of the release gate, not a side script.
+
 `make check` now includes offline `tools/tests/` regressions (real signify fixtures,
 not a second parser). Native OpenBSD tests separately exercised ownership via
 actual doas, generator tracing/permissions/cleanup, all secret-key stdin ordering,

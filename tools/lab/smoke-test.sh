@@ -58,8 +58,8 @@ cleanup
 trap cleanup EXIT
 
 # Fixed lab keys: valid 32-byte base64, never used outside this VM.
-KEY0='AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='	# scan:allow-fixture
-KEY1='AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI='	# scan:allow-fixture
+KEY0='AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='	# scan:allow-fixture[sha1:de49f82911b9d304f1518e8855db8f9cab08b006]
+KEY1='AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI='	# scan:allow-fixture[sha1:35e3bbf9261d562486ce87cec758ee0e03293c36]
 
 echo "== kernel: $(uname -v)"
 case "$(uname -v)" in

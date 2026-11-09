@@ -37,7 +37,7 @@ parse_options "$1"
 
     def test_lists_do_not_expand_filenames(self):
         r = self.run_parser('[Interface]\nPrivateKey = dummy\nAddress = *, 10.0.0.1/24\nDNS = *.invalid, 1.1.1.1\n[Peer]\nPublicKey = dummy\nAllowedIPs = *\n',
-                            'printf "ADDR:%s\\n" "${ADDRESSES[@]}"; printf "DNS:%s\\n" "${DNS_SEARCH[@]}"; REAL_INTERFACE=awg9; ifconfig() { printf "ARG:%s\\n" "$@"; }; set_config\n')
+                            'printf "ADDR:%s\\n" "${ADDRESSES[@]}"; printf "DNS:%s\\n" "${DNS_SEARCH[@]}"; REAL_INTERFACE=awg9; ifconfig() { printf "ARG:%s\\n" "$@"; }; build_config_args; apply_config\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('ADDR:*\n', r.stdout)
         self.assertIn('ARG:*\n', r.stdout)
@@ -54,7 +54,8 @@ PRIVATE_KEY=private-fixture; HPK=header-fixture; PEER_COUNT=1
 PEER_PUBKEYS=(public-fixture); PEER_PSKS=(psk-fixture)
 REAL_INTERFACE=awg9
 ifconfig() { printf 'ARG:%s\\n' "$@"; while IFS= read -r key; do printf 'STDIN:%s\\n' "$key"; done; }
-set_config
+build_config_args
+apply_config
 ''')
         self.assertEqual(r.returncode, 0, r.stderr)
         arguments = [line for line in r.stdout.splitlines() if line.startswith('ARG:')]

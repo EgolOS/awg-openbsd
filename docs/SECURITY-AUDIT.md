@@ -39,10 +39,10 @@ soak, coverage-guided fuzzing or performance result is claimed.
 |---|---|---|---|---|---|
 | critical | 0 | 0 | 0 | 0 | 0 |
 | high | 5 | 0 | 1 | 1 | 7 |
-| medium | 9 | 1 | 1 | 0 | 11 |
+| medium | 10 | 1 | 1 | 0 | 12 |
 | low | 11 | 0 | 3 | 0 | 14 |
 | info | 1 | 1 | 1 | 0 | 3 |
-| **total** | **26** | **2** | **6** | **1** | **35** |
+| **total** | **27** | **2** | **6** | **1** | **36** |
 
 ## Register
 
@@ -267,7 +267,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   with the path, owner and mode). The unprivileged build was proven end to end on OpenBSD 8.0:
   `config AWG.MP` + `make -j2` as `awgbuild` produced a 33.5 MB kernel with
   `awg_encap`/`awg_decap`/`awg_ioctl_set` linked, and that kernel booted (`AWG.MP#0`,
-  `lab@…:/home/build2/sys/…`).
+  `lab@…:<sys>/sys/…`).
 - Residual: the builder still compiles code that root installs; the integrity boundary is
   `verify_kernel_artifact` plus the manifest, not the compiler. A compromised builder can produce
   a kernel that passes an ELF/symbol check — the same trust any package build carries.
@@ -602,6 +602,86 @@ soak, coverage-guided fuzzing or performance result is claimed.
 - Residual: base-release identity intentionally rejects unreviewed errata-modified
   ifconfig; update provenance and patch after review, never silently bypass hash.
 
+### AWG-038 — `awgctl` cannot pledge: SIOCSAWG/SIOCGAWG are not in the kernel's PLEDGE_INET group
+- Severity: medium · State: fixed · Confidence: confirmed (ktrace + rebuilt kernel + clean-tree install)
+- Surface: local privileged management tool (`sbin/awgctl`)
+- Affected: OpenBSD 8.0 `sys/kern/kern_pledge.c` (baseline
+  `0d73ac5f2e792968f94ebd8de0c3e465c5711072c4cbb0ba9cfec2d07060583d`), ioctl→promise
+  switch; `src/if_awg.h:39-40` declares the two numbers.
+- Root cause: `sys_ioctl(2)` maps an ioctl request to a promise by a `switch (com)` that
+  names neither `SIOCSAWG` (223) nor `SIOCGAWG` (224), so both fall through to
+  `pledge_fail(p, EPERM, PLEDGE_TTY)`. A tool that pledges `stdio rpath inet …` is
+  SIGABRTed (`Abort trap (core dumped)`, exit 134) on its first `SIOCGAWG`; `ktrace`
+  shows `PLDG ioctl, "tty", errno 1` immediately before `PSIG SIGABRT`.
+- Fix (maintainer decision: ship it — this project already installs a custom kernel, so
+  the base-system change is coherent): `kern_pledge.c` gains the two cases in the
+  `PLEDGE_INET` group plus `#include <net/if_awg.h>` for the constants. The hunk is
+  generated from `src/kern_pledge.c.orig` → `src/kern_pledge.c` by `generate-patch.sh`,
+  so `awg-openbsd.patch` carries it, and `install.sh:install_pledge_hunk` applies it
+  before `config AWG.MP` (idempotent, verified against the recorded release baseline).
+- Regression test: `tools/lab/awgctl-test.sh` runs `awgctl show`/`up`/`add`/`del` against
+  the running kernel; the shipped pledge set is `stdio rpath inet route tty dns proc exec`
+  (`route` for `getifaddrs`, `tty` for the two ioctls).
+- Evidence: `docs/evidence/2026-11-08/w1-pledge-hunk.log` — VM 2205, kernel `AWG.MP#2`
+  built through `install.sh --all` from a tree whose `kern_pledge.c` was the stock 8.0 file,
+  `/bsd` sha256 `8770841a…0fc398`; `awgctl show awg0` exits 0 on a legacy interface (the
+  pre-fix binary died with `Abort trap (core dumped)`, rc 134).
+
+### AWG-039 — the unprivileged build step assumes a `doas` rule for the build user
+- Severity: low · State: open · Confidence: confirmed on a lab guest
+- Surface: operational / installation (supply-chain adjacent)
+- Affected: `install.sh:126` —
+  `( cd "$dir" && doas -u "$BUILD_USER" sh -c "$cmd" )`.
+- Root cause: the privilege drop to `_awgbuild` is expressed with `doas -u`, which requires
+  an explicit `permit … as _awgbuild` rule. A stock OpenBSD host whose `doas.conf` holds only
+  `permit nopass <admin> as root` (the shape the runbooks produce) makes every build step
+  fail with `doas: Operation not permitted`, so `install.sh --all` stops after
+  `==> building as _awgbuild` with `ERROR: ifconfig build failed`.
+- Impact: fails closed — no build runs as root, so this is a deployment blocker, not a
+  privilege bug. It is still a defect: the runbook does not mention the rule and the failure
+  arrives halfway through an install.
+- Fix (proposed): when running as root, prefer `su -m "$BUILD_USER" -c "$cmd"` (root needs no
+  `doas` rule to change user), and fall back to `doas -u` only when not already root; print
+  the exact `doas.conf` line to add when neither works. Document the requirement in
+  `docs/DEPLOY-vps.md` either way.
+- Validation: reproduce on a disposable guest (`permit … as root` only), apply the change,
+  re-run `install.sh --all`, confirm the build runs as `_awgbuild`
+  (`ps -o user -p <cc1 pid>`) and the install completes.
+
+### AWG-040 — `awgctl up` could not open any config after `unveil(2)` (regression, fixed)
+- Severity: high (feature-breaking) · State: fixed · Confidence: confirmed on a live guest
+- Surface: local privileged management tool (`sbin/awgctl up`)
+- Root cause: `open_trusted()` opened the config descriptor first — correct — but then walked
+  the path's ancestors with `stat(2)` *after* `unveil(NULL, NULL)`. Lookup of a parent outside
+  the unveiled subtree returns `ENOENT`, so every `up` (default path and `--config` alike)
+  failed with `/etc/amnezia: No such file or directory` while the file was present and
+  correctly owned. Introduced by the trust-chain hardening in the same round (`4a26481`).
+- Fix: the check now matches the confinement the kernel actually enforces — the path must
+  begin with `CONF_DIR "/"`, `CONF_DIR` itself is `stat(2)`ed for root ownership and mode, and
+  the file is verified through `open(2)`+`fstat(2)` (mode 0600/0400, root-owned, regular). A
+  config outside the directory is refused with an explicit message instead of `ENOENT`.
+  Commit `71a02b2`.
+- Regression test: `tools/lab/awgctl-test.sh` case `up --config` (peer count 2 → add 3 →
+  del 2 → up again 2) plus the refusal case; evidence in
+  `docs/evidence/2026-11-08/w1-pledge-hunk.log`.
+
+### AWG-041 — `install.sh` has no host lock: two concurrent runs truncate `/bsd`
+- Severity: high (can leave a host unbootable) · State: open · Confidence: observed
+- Surface: operational / installation
+- Root cause: nothing serialises a second `install.sh` against the first. Observed: the run
+  that installed `/bsd` (manifest `installed_bsd_sha256=8770841a…`, `installed_at`
+  10:28:02Z) was followed within two minutes by `/bsd` at **0 bytes** with `/bsd.awg-prev`
+  and `/bsd.awg-staging` both gone. Two other worker instances and one orchestrator session
+  were issuing commands to the same guest in that window; the individual writer was **not
+  isolated**, which is the point — without a lock there is no way to attribute or prevent it. The guest kept running (the kernel was already in
+  memory) and only a reboot would have exposed the damage.
+- Fix (proposed): take an exclusive lock (`flock` on `/var/db/awg-install/lock` or `mkdir`
+  based) for the whole run, refuse with a clear message when another instance holds it, and
+  never unlink the backup pair before the new `/bsd` is verified and `sync`ed. Validate that
+  `/bsd` is a non-empty file with the expected hash before the run exits successfully.
+- Evidence this happened: manifest `installed_bsd_sha256=8770841a…` vs `ls -l /bsd` → 0 bytes
+  at the next check; repaired from `…/compile/AWG.MP/obj/bsd` and re-verified by rebooting.
+
 ## Rejected claims
 
 - **R-1 (from AWG-001) — `m_pullup` reads past one cluster.** Counter-evidence: `m_pullup()` in
@@ -612,6 +692,16 @@ soak, coverage-guided fuzzing or performance result is claimed.
 - **R-2 (from AWG-002) — the 9216-byte threshold.** `MAXMCLBYTES` is 64 KiB in 8.0
   (`sys/sys/mbuf.h`) and the cluster pools go up to 64 KiB, so the panic is real only above
   ~65 KB of aggregate packet+padding. The fix uses the real constant.
+- **R-4 — "`SIOCAIFADDR: File exists` on an awg(4) interface means the driver rejects IPv6".**
+  Counter-evidence (2026-11-08, VMs 2203/2204, both `AWG.MP#11`): the address table is global
+  and keyed by address, so an address can live on only one ifnet at a time. In one boot,
+  `ifconfig awg0 inet6 fd00:77::1/64` returned 0 and installed the address; the same command
+  on stock `wg0` then failed with `SIOCAIFADDR: File exists`, while a fresh `fd00:78::1/128`
+  was accepted by `wg0`. The refusal therefore tracks the address, not the driver. Earlier
+  matrix rows that read as AWG IPv6 failures were harness artefacts (no reciprocal IPv6
+  allowed-IPs were installed). Evidence: `reports/w3-addr.md`, commit `e0e5fa0` on
+  `test/network-matrix`. The driver's IPv6 data path is still only partially tested — the
+  dual-stack traffic test is a separate task.
 - **R-3 (from AWG-003) — "no eval needed" applied to all numeric fields.** Only `S1`–`S4` were
   interpolated into `(( ))`; the other numeric fields went to `ifconfig`, which validates them.
   All are validated now, so the distinction is moot.

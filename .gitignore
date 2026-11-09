@@ -5,6 +5,10 @@
 *.orig
 *.debug
 *.o
+# R4-03: the pledge baseline is a source, not a build artifact. The *.orig
+# rule above would drop it from a fresh clone and generate-patch.sh would
+# then emit awg-openbsd.patch without the kern_pledge.c hunk (AWG-038).
+!src/kern_pledge.c.orig
 
 # Misc
 ktrace.out
@@ -16,3 +20,11 @@ tools/lab/install.conf
 *.iso
 *.img
 __pycache__/
+awgctl
+manifest.kv
+# R6-N1 lock artifacts: the lock generation directory (gen-<N>) and its CAS
+# slot are runtime state next to $LOCKFILE, not sources.
+gen-*
+*.cas.*
+awgctl-fixture
+.r7repro2/

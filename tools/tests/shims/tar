@@ -1,0 +1,11 @@
+#!/bin/sh
+# tar shim: tolerate -C DIR and -xzf-style flags; the fixture tarball is plain tar.
+if [ "$1" = "-C" ]; then
+    shift
+    shift
+fi
+if [ "$1" = "-xzf" ] || [ "$1" = "-xzf" ]; then
+    /usr/bin/tar -xf "$2"
+    exit $?
+fi
+/usr/bin/tar -xf "$1"

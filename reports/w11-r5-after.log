@@ -1,0 +1,47 @@
+== F1. N2: set on an unchanged 3.1 interface (rc 0, PORT-only write)
+PASS: F1: unchanged 3.1 set exits 0
+PASS: F1: exactly one SIOCSAWG
+PASS: F1: write carries the port only (flags=4)
+
+== F2. N2: set on a busy 3.1 interface (counters move between GETs)
+PASS: F2: busy 3.1 set exits 0
+PASS: F2: exactly one SIOCSAWG
+
+== F3. N2: the grouped write keeps the read-back siblings (R4-06 win)
+PASS: F3: set Jc exits 0
+PASS: F3: Jc-only write carries JC only (flags=32)
+
+== F4. N3: address read-back compares parsed bytes and prefix
+PASS: F4: fd00::1/128 accepted (matches the installed address)
+PASS: F4: fd00:0:0:0:0:0:0:1/128 accepted (matches the installed address)
+PASS: F4: FD00::1/128 accepted (matches the installed address)
+PASS: F4: fd00:000:0:00:0:0:0:1/128 accepted (matches the installed address)
+PASS: F4: fd00::1/64 rejected — the prefix is checked too
+PASS: F4: a fresh address installs and reads back
+
+== F5. R4-07: trust walk from the root, O_NOFOLLOW, non-blocking open
+PASS: F5: a plain path under CONF_DIR is accepted
+PASS: F5: world-writable intermediate refused (rc 1)
+PASS: F5: symlinked component refused (rc 1)
+PASS: F5: '.' component refused (rc 1)
+PASS: F5: '..' component refused (rc 1)
+PASS: F5: FIFO in place of the config refused (rc 1)
+
+== F6. R4-09: exact arity, ENOTTY propagation, child signal status
+PASS: F6: down with a surplus argument exits 1
+PASS: F6: down with exact arity exits 0
+PASS: F6: show with a surplus argument exits 1
+PASS: F6: show with exact arity exits 0
+PASS: F6: del with a surplus argument exits 1
+PASS: F6: set on an ENOTTY target exits 3
+F6: (see F7 for the signal case)
+
+== F7. R4-09: EEXIST is only idempotent when the child exited normally
+PASS: F7: SIGABRT child reported as a signal death (rc 1)
+
+== F8. R5: a getifaddrs entry with no name does not crash the tool
+PASS: F8: show with a name-less entry exits 0
+PASS: F8: up with a name-less entry exits 0
+PASS: F8: up still writes once
+
+RESULT: all fixture cases passed

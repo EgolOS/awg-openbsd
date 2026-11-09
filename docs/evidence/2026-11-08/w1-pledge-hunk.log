@@ -1,0 +1,36 @@
+# awgctl clean-tree proof — VM 2205, 2026-11-08T10:32:15Z
+kernel: AWG.MP#2
+bsd sha256: 8770841a405729f257219e9d4698260492c3836150c8a0c8e6ec5c87a09fc398 (31394656 bytes)
+# note: the first capture read an empty /bsd — a concurrent installer run truncated it
+# while this proof was running (AWG-041). Repaired from the build tree, hash matches the
+# manifest's installed_bsd_sha256, and the guest was rebooted again to confirm it boots.
+awgctl sha256: 3936f097a9759b44046ac22151275e9c7c122193f0fc76dc4e69a11b9858d679
+
+## pledge: show on a fresh legacy interface (the pre-fix binary aborted here)
+awg0:
+	awgversion legacy
+	awgjc 0
+	awgjmin 0
+	awgjmax 0
+	awgs1 0
+	awgs2 0
+	awgh1 1
+	awgh2 2
+	awgh3 3
+	awgh4 4
+rc=0
+
+## peer count: 2 -> add 3 -> del 2 -> up again 2
+up rc=0
+	awgpeer If9DFGiHQlso/mr8y71E2/UKw+CeSfTMzbq+CLMurFQ=
+	awgpeer lJDd8aC66DoBZ2whpF11FdjwgxW/Mell2dHj/fz5NE0=
+add rc=0
+peers=3
+del rc=0
+peers=2
+reup rc=0
+peers=2
+
+## refusal: a config outside CONF_DIR
+awgctl: /etc/outside.conf: config must live under /etc/amnezia/amneziawg — unveil(2) confines awgctl to that directory
+rc=1

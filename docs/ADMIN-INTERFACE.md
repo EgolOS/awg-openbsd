@@ -154,7 +154,8 @@ the config text. The keyword table drops 44 → 16 entries, the setter block dro
 
 ## 5. Recommendation
 
-**Keep the `ifconfig` patch (Option A) and do not build `awgctl`.** The numbers
+**Keep the `ifconfig` patch (Option A) as the primary management path, and ship
+`awgctl` alongside it.** The numbers
 say the patch is cheap: 768 added lines is 8 hunks in one file, and 672 of them
 (88%) sit in an append-only tail that cannot collide; only 96 lines across 6
 anchors are release-sensitive, and `patch(1)` with its 6 lines of context absorbs
@@ -163,11 +164,26 @@ most upstream edits. The dominant per-release cost is the driver sync
 `if_awg.c`), not the management path, and `awgctl` does not reduce that cost —
 it adds a third binary that reads the same two ioctls, keeps 5 of the 7
 `ifconfig` output-parsing sites in `awg-quick`, and gives up `ifconfig awg0` as
-the status view. Concretely, ship nothing new this release: keep the patch and
-`awg-quick` as they are, and spend the effort on the two cheap gaps the audit
+the status view. The shipped snapshot builds `awgctl` with `--all`, installs it
+next to `ifconfig` (with its `awgctl.8` manpage), records it in the backup manifest and rolls it back with the
+pair, so the tool is delivered without displacing the patch. The publishing
+modes and the artifacts each one installs are fixed by `install.sh`:
+
+| Mode | Installs | Omits |
+| --- | --- | --- |
+| `--all` (default) | `/bsd`, patched `/sbin/ifconfig` + `ifconfig.8`, `/usr/include/net/if_awg.h`, `/usr/local/sbin/awgctl` + `awgctl.8`, `/usr/local/sbin/awg-quick` | — |
+| `--kernel-only` | `/bsd`, `/usr/include/net/if_awg.h` | `awgctl` + `awgctl.8`, `awg-quick`, patched `ifconfig` — the management tool matches the running kernel, not the rebuilt one |
+| `--tools-only` | patched `/sbin/ifconfig` + `ifconfig.8`, `/usr/include/net/if_awg.h`, `/usr/local/sbin/awg-quick` | `awgctl` + `awgctl.8` (by design), `/bsd` |
+| `--build-only` | the built kernel in its object directory | every publish (`/bsd` untouched) |
+| `--rollback` | the recorded previous pair (`/bsd` + `/sbin/ifconfig` + header + `awgctl`) | a rebuild |
+
+Concretely, ship
+the patch, `awg-quick` and `awgctl`, and spend the effort on the two cheap gaps
+the audit
 already lists — record `sbin/ifconfig/ifconfig.c` in the baseline manifest
-(`tools/upstream/8.0.sha256` has 9 entries, all `net/` and `crypto/`, none from
-`sbin/`, so the file the patch is applied to has no recorded digest) and add a
+(`tools/upstream/8.0.sha256` now carries the `sbin/ifconfig/ifconfig.c` digest
+next to the `net/` and `crypto/` entries, so the file the patch is applied to
+has a recorded digest) and add a
 `static_assert` on `sizeof`/`offsetof` of `awg_data_io`/`awg_peer_io`/`awg_aip_io`
 (`docs/ARCHITECTURE.md:451`). Re-evaluate at the 8.1 re-roll: if the 6 small
 hunks need more than about an hour of manual merge, take Option C then, because
@@ -178,7 +194,8 @@ wholesale; until then it is a second config path for no measured gain.
 ## 6. Evidence to gather before committing
 
 - **`ifconfig.c` churn between releases.** Record `sha256 sbin/ifconfig/ifconfig.c`
-  per release next to the existing 9 entries in `tools/upstream/8.0.sha256`, then
+  per release (the 8.0 baseline already carries it, alongside the other 12
+  entries in `tools/upstream/8.0.sha256`), then
   diff 7.9 → 8.0 (and -current snapshots) restricted to the 8 anchor sites, so
   "the patch is cheap" becomes a measured line count per release rather than a
   claim. `tools/upstream-diff.py` already does this for `if_wg.c`; extend it to

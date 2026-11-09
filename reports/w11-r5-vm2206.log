@@ -1,0 +1,169 @@
+== kernel: AWG.MP#2
+PASS: custom AWG kernel is running
+
+== 1. up: config with one peer, kernel state matches the file
+FAIL: awgctl up awg9 failed
+FAIL: ifconfig missing port (wanted awgport 51820)
+FAIL: ifconfig missing version legacy (wanted awgversion legacy)
+FAIL: ifconfig missing jc/jmin/jmax (wanted awgjc 3 awgjmin 10 awgjmax 25)
+FAIL: ifconfig missing s1/s2 (wanted awgs1 26 awgs2 33)
+FAIL: ifconfig missing h1-h4 (wanted awgh1 100 awgh2 200 awgh3 300 awgh4 400)
+FAIL: ifconfig missing peer key (wanted awgpeer jClj1FiPuqBEcmhDqJSqB8favq6USkiwFzGt/uTOjTE=)
+FAIL: ifconfig missing endpoint (wanted awgendpoint 127.0.0.1 51821)
+FAIL: ifconfig missing allowed-ips v4 (wanted awgaip 10.9.19.2/32)
+FAIL: ifconfig missing allowed-ips v6 (wanted awgaip fd00::2/128)
+FAIL: ifconfig missing keepalive (wanted awgpka 25 (sec))
+FAIL: ifconfig missing address (wanted inet 10.9.19.1 netmask 0xffffff00)
+FAIL: ifconfig missing mtu (wanted mtu 1420)
+Abort trap (core dumped) 
+FAIL: show reports no peer for a one-peer config
+
+== 2. show equals ifconfig, field by field
+FAIL: awgctl show differs from ifconfig
+
+== 3. idempotent up, down destroys, down on missing interface
+FAIL: second awgctl up failed
+PASS: awgctl up twice is idempotent
+Abort trap (core dumped) 
+FAIL: awgctl down failed
+PASS: awgctl down destroys the interface (peers go with it)
+Abort trap (core dumped) 
+FAIL: awgctl down on a missing interface: rc=134 msg=
+
+== 4. bad configs refused with exit 2, no partial state
+FAIL: baseline up failed
+Abort trap (core dumped) 
+PASS: badkey.conf refused with exit 2
+PASS: unknown.conf refused with exit 2
+PASS: revrange.conf refused with exit 2
+PASS: s3legacy.conf refused with exit 2
+Abort trap (core dumped) 
+PASS: interface unchanged after the four refused configs
+
+== 5. private key never appears in ps
+FAIL: background up failed
+FAIL: private key visible in ps
+
+== 6. loopback round trip: awg9 <-> awg10, counters move
+FAIL: up awg9 failed
+FAIL: up awg10 failed
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+FAIL: no handshake within 8s
+Abort trap (core dumped) 
+FAIL: tx counter did not move
+FAIL: rx counter did not move
+
+== 7. 3.1 interface prints the 3.1-only fields
+FAIL: up with 3.1 config failed
+Abort trap (core dumped) 
+FAIL: 3.1 show missing awgversion 3.1
+FAIL: 3.1 show missing awgs3 22
+FAIL: 3.1 show missing awgs4 23
+FAIL: 3.1 show missing awgh1 100-200
+FAIL: 3.1 show missing awgi1 <b 0xc700000001><r 16><t>
+FAIL: 3.1 show missing awghpk (present)
+FAIL: 3.1 show missing awgcpa 18
+FAIL: 3.1 show missing awgrekeyaftertime 110-130
+FAIL: 3.1 show missing awgrekeytimeout 4-6
+FAIL: 3.1 show missing awgrejectaftertime 170-190
+FAIL: 3.1 show missing awgkeepalivetimeout 10-12
+FAIL: 3.1 show missing awgmaxhandshakeattempts 3
+FAIL: 3.1 show missing awgrandomtrailers
+FAIL: 3.1 show differs from ifconfig
+PASS: legacy show omits the 3.1-only fields
+
+== 8. 3.1 keeps its version across set, add peer and del peer
+FAIL: 8: up with 3.1 config failed
+Abort trap (core dumped) 
+FAIL: 8: fresh interface is not 3.1
+FAIL: 8: add peer failed
+Abort trap (core dumped) 
+FAIL: 8: add peer reset the version
+Abort trap (core dumped) 
+FAIL: 8: added peer missing after add
+FAIL: 8: set ListenPort failed
+Abort trap (core dumped) 
+FAIL: 8: set ListenPort reset the version
+Abort trap (core dumped) 
+FAIL: 8: set ListenPort not applied
+FAIL: 8: del peer failed
+Abort trap (core dumped) 
+FAIL: 8: del peer reset the version
+Abort trap (core dumped) 
+PASS: 8: deleted peer is gone
+Abort trap (core dumped) 
+FAIL: 8: partial commands lost awgs3
+
+== 9. grouped set keeps the siblings it does not name
+FAIL: 9: set Jc failed
+Abort trap (core dumped) 
+FAIL: 9: set Jc 7 not applied
+FAIL: 9: Jmin/Jmax were zeroed by a Jc-only set
+FAIL: 9: set S2 failed
+Abort trap (core dumped) 
+FAIL: 9: S1 was zeroed by an S2-only set
+FAIL: 9: set H2 failed
+Abort trap (core dumped) 
+FAIL: 9: a partial H set lost its siblings
+
+== 10. MTU is validated before the interface is mutated
+Abort trap (core dumped) 
+PASS: MTU (badmtu) refused with exit 2
+PASS: MTU (badmtu9001) refused with exit 2
+Abort trap (core dumped) 
+PASS: MTU refusals leave peer count (0) and  unchanged
+
+== 12. R4-06: an unrelated set keeps the rotated key; a lost update fails
+Abort trap (core dumped) 
+FAIL: 12: baseline interface is not KEY0
+FAIL: 12: rotate exits 134
+FAIL: 12: unrelated set ListenPort exits 134
+Abort trap (core dumped) 
+FAIL: 12: unrelated set replayed a stale key (pubkey is not KEY1)
+FAIL: 12: the unrelated set's port did not apply
+FAIL: 12: concurrent ListenPort set exits 134
+PASS: 12: concurrent key set loses the race and exits 134 (not a silent revert)
+Abort trap (core dumped) 
+FAIL: 12: lost update mixed the two writes (port/key mismatch)
+
+== 13. R4-07: every path component is trusted, not just the file
+PASS: 13: world-writable intermediate directory refused (exit 1)
+PASS: 13: symlinked path component refused (exit 1)
+FAIL: 13: up with a swapped config exits 134
+Abort trap (core dumped) 
+Abort trap (core dumped) 
+FAIL: 13: read a swapped-in file instead of the verified descriptor
+
+== 14. R4-09: ABI/argument failures are real failures
+FAIL: 14: show on a live interface exits 134
+PASS: 14: show on an explicitly named missing interface exits 134 (ENOTTY not swallowed)
+PASS: 14: set with an unmatched trailing token exits 1 (exact arity)
+FAIL: 14: exact-arity set exits 134
+Abort trap (core dumped) 
+FAIL: 14: exact-arity set did not apply the port
+FAIL: 14: second up with a duplicate address exits 134
+FAIL: 14: address not read back on the target interface
+
+== 15. R4-10: literal secrets warn, buffers are wiped
+FAIL: 15: literal key argument exits 134
+FAIL: 15: literal secret accepted silently
+Abort trap (core dumped) 
+FAIL: 15: literal key not applied
+
+== 11. secrets come from the file or stdin, not only from argv
+FAIL: set PrivateKey - from stdin exits 134
+Abort trap (core dumped) 
+FAIL: stdin key not applied
+FAIL: add ... psk - from stdin exits 134
+Abort trap (core dumped) 
+FAIL: peer with a stdin PSK not installed
+FAIL: stdin secret visible in ps
+
+RESULT: 81 case(s) failed

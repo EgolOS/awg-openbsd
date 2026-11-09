@@ -23,16 +23,31 @@ LAN_B ?= 192.168.99.2
 TREE        ?= /usr/src/sys
 
 LAB_KNOWN_HOSTS ?= $(HOME)/.hermes/cache/scratch/awg-lab/known_hosts
+AWGCTL_FIX_IFCONFIG ?= $(CURDIR)/tools/lab/fixture-ifconfig.py
 SSH_OPTS = -o BatchMode=yes -o StrictHostKeyChecking=yes \
            -o UserKnownHostsFile="$(LAB_KNOWN_HOSTS)" \
            -o ConnectTimeout=10 -i "$(LAB_SSH_KEY)"
 SSH  = ssh $(SSH_OPTS) -p $(LAB_VM_PORT)
 SCP  = scp $(SSH_OPTS) -P $(LAB_VM_PORT)
 
-.PHONY: check check-syntax check-py check-tests check-scan check-patch check-vm check-interop baseline manifest clean
+.PHONY: check check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch check-vm check-interop baseline manifest awgctl awgctl-fixture clean
 
-check: check-syntax check-py check-tests check-scan check-patch
+check: check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch
 	@echo "repository checks: OK"
+
+# The compiled-C integration gate is only worth running if it can fail. This
+# self-check proves that property: a clean run is green, and a run with I2
+# rewritten by the fixture must fail with the changed value in the message.
+# It runs the gate twice, so it is the slowest part of `check`.
+# R13: declared phony so a file named check-cgate cannot skip the recipe.
+check-cgate:
+	@sh tools/lab/awgctl-gate-selftest.sh
+
+# R13: the state-oracle controls (C1..C8) are part of the mandatory gate, so
+# the effective-address and I-spec semantics stay guarded after a repair.
+check-oracle:
+	@sh tools/lab/oracle-controls.sh
+	@$(PYTHON) tools/lab/gate-controls.py
 
 # awg-quick is bash (arrays, [[ ]]); install.sh and the lab scripts are POSIX
 # sh. Checking them all with one shell is how CI caught a false failure: dash
@@ -87,6 +102,27 @@ check-interop:
 baseline:
 	@$(PYTHON) tools/upstream-diff.py --tree "$(TREE)"
 
+# Standalone management tool (docs/ADMIN-INTERFACE.md Option B). Built with
+# the host C toolchain; on OpenBSD this uses bsd.prog.mk, elsewhere a plain
+# cc invocation of the same source keeps `make awgctl` usable for smoke
+# builds.
+awgctl:
+	@if [ -f /usr/share/mk/bsd.prog.mk ]; then \
+		$(MAKE) -C sbin/awgctl; \
+	else \
+		$(CC) $(CFLAGS) -DAWGCTL_LINUX -Isrc -Isbin/awgctl -o awgctl sbin/awgctl/awgctl.c -lutil; \
+	fi
+
+
+# Host fixture: the production awgctl.c linked against an ioctl/getifaddrs
+# stub (tools/lab/fixture-stubs.c) plus a recording ifconfig stand-in, so the
+# R5 regression cases (CAS token, address read-back, arity) run without an
+# OpenBSD kernel. Needs a POSIX host with cc; not part of the release.
+awgctl-fixture:
+	$(CC) $(CFLAGS) -DAWGCTL_LINUX -Isrc -Isbin/awgctl \
+		-DIFCONFIG_PATH='"$(AWGCTL_FIX_IFCONFIG)"' \
+		-o awgctl-fixture sbin/awgctl/awgctl.c \
+		tools/lab/fixture-stubs.c -lutil
 # Release metadata for a built kernel: hashes, versions, test results.
 #   make manifest KERNEL=/usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd \
 #       RELEASE=8.0 COMMIT=$(git rev-parse --short HEAD) TESTS="smoke=pass"

@@ -1,0 +1,5 @@
+#!/bin/sh
+# chmod shim: apply the mode for real (an artifact's exec bit must be real)
+# and record the invocation.
+[ -n "$CMDFILE" ] && printf 'chmod %s\n' "$*" >> "$CMDFILE"
+exec /bin/chmod "$@"

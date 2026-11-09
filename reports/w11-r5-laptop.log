@@ -1,0 +1,37 @@
+NOTE: SIOCSAWG=0xffffffffc02069df SIOCGAWG=0xffffffffc02069e0
+== L0. interface awg9 exists (create it)
+ifconfig: awg9: SIOCIFCREATE: Invalid argument
+awg9: no such interface
+awg9: no such interface
+NOTE: kernel answers the 3.0 layout (no awghpk)
+
+== L1. N2: set ListenPort on an unchanged interface (rc 0, one SIOCSAWG)
+FAIL: N2: set exits 1 (./awgctl[1]: syntax error: NUL byte unexpected)
+FAIL: N2: SIOCSAWG count is 0, expected 1
+
+== L2. N2: set on a busy interface (traffic first, then set)
+FAIL: N2: set on a busy interface exits 1
+FAIL: N2: busy set count 0
+
+== L3. N3: address read-back, expanded / uppercase / leading zeros
+FAIL: N3: fd00::1/128 rejected (./awgctl[1]: syntax error: NUL byte unexpected)
+FAIL: N3: fd00:0:0:0:0:0:0:1/128 rejected (./awgctl[1]: syntax error: NUL byte unexpected)
+FAIL: N3: FD00::1/128 rejected (./awgctl[1]: syntax error: NUL byte unexpected)
+FAIL: N3: fd00:000:0:00:0:0:0:1/128 rejected (./awgctl[1]: syntax error: NUL byte unexpected)
+PASS: N3: fd00::1/64 rejected, the prefix is checked
+awg9: no such interface
+
+== L4. R4-07: trust walk (symlinked component, world-writable, FIFO)
+FAIL: R4-07: a plain path is rejected (./awgctl[1]: syntax error: NUL byte unexpected)
+PASS: R4-07: world-writable intermediate refused
+PASS: R4-07: symlinked component refused (O_NOFOLLOW)
+PASS: R4-07: FIFO in place of the config refused without blocking
+
+== L5. R4-09: exact arity and ENOTTY
+PASS: R4-09: down with a surplus argument exits 1
+PASS: R4-09: show with a surplus argument exits 1
+PASS: R4-09: del with a surplus argument exits 1
+FAIL: R4-09: set on lo0 exits 1 (./awgctl[1]: syntax error: NUL byte unexpected)
+./awgctl[1]: syntax error: NUL byte unexpected
+
+RESULT: 10 laptop check(s) failed

@@ -17,3 +17,9 @@ c7d3e7bff0f4d553422f7797cc52a53be5d0895753f63e8b28ff77c172720185  crypto/curve25
 fd0e627d27513adb18a1461ca54722ccd84893450e376ec451c7ff1c261b33d0  crypto/chacha_private.h
 # the file the ifconfig patch is applied to; a mismatch means the patch context is stale
 6266edbd533c0789383678a50fa22e859693f1f64b37cb42e656e1f02c6e4e34  sbin/ifconfig/ifconfig.c
+# the file the pledge hunk is applied to (sys/kern/kern_pledge.c); the hunk adds
+# SIOCSAWG/SIOCGAWG to the PLEDGE_INET ioctl group (AWG-038)
+0d73ac5f2e792968f94ebd8de0c3e465c5711072c4cbb0ba9cfec2d07060583d  kern/kern_pledge.c
+# the same file with exactly that hunk applied (R5-R4-04): the only two
+# generations the installer accepts; a partial or bogus patch is refused
+84cf0e12d95b2968e209e766c1eca39543cd65a763647f6941a6cb557e022925  kern/kern_pledge.c.awg

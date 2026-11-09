@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# mkdir shim: BSD mkdir flags used by install.sh (-m MODE, -p). -p creates
+# parents (and tolerates an existing directory); a plain mkdir fails when the
+# directory exists, which is how the lock is taken.
+import os, sys
+a = sys.argv[1:]
+mode = None
+parents = False
+while a and a[0].startswith("-") and len(a[0]) > 1:
+    if a[0] == "-m":
+        mode = a[1]
+        a = a[2:]
+    elif a[0] == "-p":
+        parents = True
+        a = a[1:]
+    else:
+        break
+if not a:
+    sys.exit(1)
+with open(os.environ.get("CMDFILE", "/dev/null"), "a") as f:
+    f.write("mkdir %s\n" % " ".join(sys.argv[1:]))
+if parents:
+    os.makedirs(a[0], exist_ok=True)
+    if mode is not None:
+        os.chmod(a[0], int(mode, 8))
+else:
+    for p in a:
+        try:
+            os.mkdir(p)
+        except FileExistsError:
+            sys.exit(1)

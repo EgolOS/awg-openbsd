@@ -1,0 +1,15 @@
+#!/bin/sh
+# ln shim: install.sh uses `ln -s TARGET LINK` (the R6 lock's CAS slot) and
+# `ln -f TARGET LINK` (the /obsd repoint). Flags and both operands pass
+# through in order. The first version passed "$2" "$1" as the operands, so ln
+# ignored the real link name and created a link named after the target's
+# basename in the cwd — masked on the feat/awgctl lock (its generation dir sat
+# next to the lock name, so the basename link and the following mv agreed) and
+# broken on the merged lock, whose CAS slot is a distinct name (EEXIST on the
+# generation directory).
+# The sandbox reports OpenBSD; translate its no-dereference flag on GNU.
+if [ "$1" = -s ] && [ "$2" = -h ]; then
+    shift 2
+    exec /bin/ln -s -T "$@"
+fi
+exec /bin/ln "$@"

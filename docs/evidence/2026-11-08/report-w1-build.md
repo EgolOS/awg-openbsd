@@ -2,14 +2,14 @@
 commit: 7afa788d8253e152ca83b9d75878ab5937f26c2e (branch release/build-abi)
 vm: 2201 (obsd-a.my.domain), kernel before: 8.0 AWG.MP#5 → after: 8.0 AWG.MP#11
 run: 2026-11-07 ~21:15 → 2026-11-08 ~01:20 UTC (+03 local). Two build passes recorded in
-evidence/w1: pass A staged /home/build2 (kernel ident AWG.MP#0), pass B staged /home/build
+evidence/w1: pass A staged <sys> (kernel ident AWG.MP#0), pass B staged <home>
 (kernel ident AWG.MP#11, the kernel live at end of run). Both built from signify-verified 8.0
 sys/src with the same digests; all nine task steps completed on the live VM.
 
 ## Results
 | Step | Command | Status | Evidence | Notes |
 |---|---|---|---|---|
-| 1 | `uname -a; …; df -h; ls /home/build` | PASS | 00-start.txt, 01a-config.log | 8.0 AWG.MP#5, 2 vCPU, /usr 1.4G + /home 7.9G free; config AWG.MP staged OK |
+| 1 | `uname -a; …; df -h; ls <home>` | PASS | 00-start.txt, 01a-config.log | 8.0 AWG.MP#5, 2 vCPU, /usr 1.4G + /home 7.9G free; config AWG.MP staged OK |
 | 2 | `doas sh -s`: ftp sys/src/SHA256.sig + signify + sha256 | PASS | 02-fetch.log | "Signature Verified", SIGNIFY_STATUS=0; both digests match expected exactly (network path, host copy not needed). tools/upstream/8.0.sha256 pins per-file digests, not the tarballs (grep matches only the `# source:` comment) |
 | 3 | `doas useradd -m -s /bin/ksh awgbuild; id; doas -u awgbuild sh -c "doas -n true"` | PASS | 03-builder.txt | uid=1001; builder_doas_exit=1 ("doas: Operation not permitted") |
 | 4 | tar sys/src, cp driver + AWG.MP, patch conf/files, chown awgbuild | PASS | 04-unpack.log, 04b–04h | FINDING: 3rd awk in the recipe has its condition on two lines; OpenBSD awk terminates at the newline, so every line got " | awg" (1129/1129) and config(8) emitted ~50 syntax errors (first build_exit=255). Fixed with single-line awk on a pristine conf/files. Final: pseudo-device awg + if_awg.c + awg_noise.c + wg_cookie/blake2s/curve25519/chachapoly | awg |
@@ -26,7 +26,7 @@ sys/src with the same digests; all nine task steps completed on the live VM.
   sha256 c970ab834885c2388ecd4120a1990945697312cedf3eb3fb3951d89de5dd2363 (INSTALL_MATCH)
 - installed /bsd at end: sha256 29d2f07550a7d48c8e45a9bd194331f06817aacea2807c660bc625aa1246cf17
   (recorded in /var/db/kernel.SHA256; previous kernel kept as /bsd.awg-prev)
-- uname -v after final reboot: `AWG.MP#11` — kern.version "OpenBSD 8.0 (AWG.MP) #11: Sat Nov 7 21:45:06 UTC 2026, lab@obsd-a.my.domain:/home/build/sys/arch/amd64/compile/AWG.MP"
+- uname -v after final reboot: `AWG.MP#11` — kern.version "OpenBSD 8.0 (AWG.MP) #11: Sat Nov 7 21:45:06 UTC 2026, lab@obsd-a.my.domain:<home>/sys/arch/amd64/compile/AWG.MP"
 - source archives: sys.tar.gz 964b1aed…2aaf, src.tar.gz 9984c74f…e795 (signify-verified against openbsd-80-base.pub)
 
 ## Gaps
@@ -34,8 +34,8 @@ sys/src with the same digests; all nine task steps completed on the live VM.
 - Step 8 "handshake at the end": pass B verified via full check-vm suite on #11 + churn completion +
   clean dmesg; pass A churn showed 2 failures (post-churn fresh legacy pair handshake + ping, 05-churn.log)
   while the same config passes smoke-test on the same boot — AWG-030-class regression not excluded.
-- Kernel ident sequence across the two staged trees is inconsistent (AWG.MP#0 from /home/build2 at
-  00:59, AWG.MP#11 from /home/build at 22:01 with /bsd mtime 22:01 > /bsd.awg-prev 21:52): /bsd is
+- Kernel ident sequence across the two staged trees is inconsistent (AWG.MP#0 from <sys> at
+  00:59, AWG.MP#11 from <home> at 22:01 with /bsd mtime 22:01 > /bsd.awg-prev 21:52): /bsd is
   replaced between install and the observed boot; `sha256 -h` of the pass-A artifact does not match
   the running pass-B kernel. Worth reproducing.
 - Pass A boot latency ~8 min (>180 s budget); pass B <45 s.
@@ -74,7 +74,7 @@ Risks/observations from reading the driver + recipe:
 6. vmstat -m: `awgpeer` 5136-byte bucket keeps 6 items after every interface is destroyed
    (byte-identical before/after 200 churn rounds) — a peer (or stale reference) appears to survive
    teardown (AWG-030 family).
-7. /home/build2 (pass A tree, AWG.MP#0) and /home/build (pass B, AWG.MP#11) both on disk; /bsd at
+7. <sys> (pass A tree, AWG.MP#0) and <home> (pass B, AWG.MP#11) both on disk; /bsd at
    end is the pass-B artifact (29d2f075…). Disk headroom after builds: /usr 1.4G, /home ~6G.
 8. tools/upstream/8.0.sha256 documents tarball provenance only in a comment; consider adding the
    sys/src tarball digests as real entries so `grep -E 'sys.tar.gz|src.tar.gz'` verifies, not just hints.

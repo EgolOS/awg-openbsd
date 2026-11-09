@@ -1,0 +1,6 @@
+#!/bin/sh
+# ftp shim: serve the fixture tarball / SHA256.sig for `ftp -o OUT URL`.
+case "$3" in
+  *SHA256.sig) cp "$SRC_SIG" "$2" ;;
+  *) cp "$SRC_TARBALL" "$2" ;;
+esac

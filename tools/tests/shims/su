@@ -1,0 +1,6 @@
+#!/bin/sh
+# su shim (root path of builder_run: `su -m <user> -c <cmd>`): record and run
+# the command in the current shell — the sandbox has no _awgbuild account.
+[ -n "$CMDFILE" ] && printf 'su %s\n' "$*" >> "$CMDFILE"
+shift 3
+exec sh -c "$*"

@@ -1,0 +1,8 @@
+#!/bin/sh
+# mv shim: record and rename. GNU mv needs -T to replace a symlink
+# destination; BSD mv(1) (OpenBSD 8.0) has no -T and replaces by default,
+# so -T is passed only on Linux.
+case "$(uname -s)" in
+  Linux) exec /bin/mv -f -T "$@" ;;
+  *)     exec /bin/mv -f "$@" ;;
+esac

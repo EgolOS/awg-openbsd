@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-cd /home/lab/awg-assurance-1813 # scan:allow-fixture
+cd /home/user/awg-assurance-1813 # scan:allow-fixture[sha1:8714274ee689c5f49e0d2e7c0a5276cfc84085c1]
 # This is a disposable VM, not an installer run or base-tool replacement.
 doas mkdir -p /root/awg-assurance-1813
 doas chmod 700 /root/awg-assurance-1813

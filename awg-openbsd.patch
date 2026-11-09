@@ -1,5 +1,5 @@
---- /dev/null	Sun Nov  8 03:15:11 2026
-+++ net/if_awg.h	Sun Nov  8 03:15:11 2026
+--- /dev/null	Mon Nov  9 07:48:08 2026
++++ net/if_awg.h	Mon Nov  9 07:48:08 2026
 @@ -0,0 +1,174 @@
 +/*	$OpenBSD: if_awg.h,v 1.1 2026/09/24 00:00:00 truebad0ur Exp $ */
 +
@@ -176,8 +176,8 @@
 +
 +#endif /* __IF_AWG_H__ */
 
---- /dev/null	Sun Nov  8 03:15:11 2026
-+++ net/if_awg.c	Sun Nov  8 03:15:11 2026
+--- /dev/null	Mon Nov  9 07:48:08 2026
++++ net/if_awg.c	Mon Nov  9 07:48:08 2026
 @@ -0,0 +1,4023 @@
 +/*	$OpenBSD: if_awg.c,v 1.2 2026/10/20 00:00:00 truebad0ur Exp $ */
 +
@@ -4203,8 +4203,8 @@
 +			IPL_NET, 0, "awgratelimit", NULL);
 +}
 
---- /dev/null	Sun Nov  8 03:15:11 2026
-+++ net/awg_noise.h	Sun Nov  8 03:15:11 2026
+--- /dev/null	Mon Nov  9 07:48:08 2026
++++ net/awg_noise.h	Mon Nov  9 07:48:08 2026
 @@ -0,0 +1,215 @@
 +/*	$OpenBSD: awg_noise.h,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -4422,8 +4422,8 @@
 +
 +#endif /* __AWG_NOISE_H__ */
 
---- /dev/null	Sun Nov  8 03:15:11 2026
-+++ net/awg_noise.c	Sun Nov  8 03:15:11 2026
+--- /dev/null	Mon Nov  9 07:48:08 2026
++++ net/awg_noise.c	Mon Nov  9 07:48:08 2026
 @@ -0,0 +1,1405 @@
 +/*	$OpenBSD: awg_noise.c,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -5846,3 +5846,23 @@
 + | awg
 @@ crypto/chachapoly.c
 + | awg
+
+--- sys/kern/kern_pledge.c	Mon Nov  9 07:48:08 2026
++++ sys/kern/kern_pledge.c	Mon Nov  9 07:48:08 2026
+@@ -56,6 +56,7 @@
+ #include <net/pfvar.h>
+ #include <net/frame.h>
+ #include <net/if_types.h>
++#include <net/if_awg.h>
+ 
+ #include <sys/conf.h>
+ #include <sys/specdev.h>
+@@ -1102,6 +1103,8 @@
+ 
+ 	if ((pledge & PLEDGE_INET)) {
+ 		switch (com) {
++		case SIOCSAWG:
++		case SIOCGAWG:
+ 		case SIOCATMARK:
+ 		case SIOCGIFGROUP:
+ 			if (fp->f_type == DTYPE_SOCKET)

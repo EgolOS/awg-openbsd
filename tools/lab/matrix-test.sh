@@ -10,7 +10,7 @@
 # rejected but is not only shows up as a peer that never completes a handshake.
 set -u
 
-KEY0='AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='	# scan:allow-fixture
+KEY0='AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='	# scan:allow-fixture[sha1:de49f82911b9d304f1518e8855db8f9cab08b006]
 FAILED=0
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=$((FAILED + 1)); }

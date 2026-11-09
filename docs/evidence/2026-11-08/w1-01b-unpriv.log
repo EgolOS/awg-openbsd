@@ -1,5 +1,5 @@
-drwxrwx---  2 awgbuild  wheel  117248 Nov  7 21:46 /home/build2/sys/arch/amd64/compile/AWG.MP/obj
--rwxrwx---  1 awgbuild  wheel  33518410 Nov  7 21:46 /home/build2/sys/arch/amd64/compile/AWG.MP/obj/bsd
+drwxrwx---  2 awgbuild  wheel  117248 Nov  7 21:46 <sys>/sys/arch/amd64/compile/AWG.MP/obj
+-rwxrwx---  1 awgbuild  wheel  33518410 Nov  7 21:46 <sys>/sys/arch/amd64/compile/AWG.MP/obj/bsd
 uid=1001(awgbuild) gid=1001(awgbuild) groups=1001(awgbuild)
 doas: Operation not permitted
 builder_doas=1

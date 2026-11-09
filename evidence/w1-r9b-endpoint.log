@@ -1,0 +1,38 @@
+# R9/R4-08b Endpoint resolution — repro before/after (host, mocked ifconfig+getent)
+
+$ python3 reports/w1-r9b-endpoint-repro.py    # HEAD 5c66986 (before)
+EXIT 0
+--- stderr ---
+[!] WARNING: <profile>/cache/scratch/tmp1f4bnwhc is mode 600, expected 700	# scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+[#] ifconfig awg9 create
+[#] ifconfig awg9 awgversion legacy awgkey <redacted> awgpeer pub awgendpoint awg.example.invalid 51820 awgaip 0.0.0.0/0
+[#] ifconfig awg9 inet 10.0.0.1/24 alias
+[#] ifconfig awg9 mtu 1420
+[#] ifconfig awg9 up
+[#] route -q -n add -inet 0.0.0.0/1 -iface 10.0.0.1
+[#] route -q -n add -inet 128.0.0.0/1 -iface 10.0.0.1
+[+] Backgrounding route monitor
+--- recorded calls ---
+
+IFC
+IFC awg9 create
+IFC awg9 awgversion legacy awgkey - awgpeer pub awgendpoint awg.example.invalid 51820 awgaip 0.0.0.0/0
+IFC awg9
+IFC awg9 inet 10.0.0.1/24 alias
+IFC awg9 mtu 1420
+IFC awg9 up
+ROUTE
+ROUTE
+ROUTE
+ROUTE
+ROUTE
+ROUTE
+
+$ python3 reports/w1-r9b-endpoint-repro.py    # HEAD 01c7e74 (after)
+EXIT 1
+--- stderr ---
+[!] WARNING: <profile>/cache/scratch/tmpmty77ilw is mode 600, expected 700	# scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+driver.bash: Peer endpoint 'awg.example.invalid:51820' does not resolve to an inet address
+--- recorded calls ---
+
+GETENT hosts awg.example.invalid

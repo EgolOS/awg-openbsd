@@ -1,0 +1,55 @@
+test_kernel_sha256_restored_after_publish_rollback (test_installer_r8_recovery.InstallerR8Recovery.test_kernel_sha256_restored_after_publish_rollback) ... ok
+test_recovery_without_manifest_reports_nothing_to_roll_back (test_installer_r8_recovery.InstallerR8Recovery.test_recovery_without_manifest_reports_nothing_to_roll_back) ... ERROR
+test_restore_missing_awgctl_backup_fails_closed (test_installer_r8_recovery.InstallerR8Recovery.test_restore_missing_awgctl_backup_fails_closed) ... FAIL
+test_restore_missing_header_backup_fails_closed (test_installer_r8_recovery.InstallerR8Recovery.test_restore_missing_header_backup_fails_closed) ... FAIL
+test_rollback_restores_kernel_sha256_member (test_installer_r8_recovery.InstallerR8Recovery.test_rollback_restores_kernel_sha256_member) ... FAIL
+test_second_signal_during_recovery_reports_rolled_back (test_installer_r8_recovery.InstallerR8Recovery.test_second_signal_during_recovery_reports_rolled_back) ... ok
+
+======================================================================
+ERROR: test_recovery_without_manifest_reports_nothing_to_roll_back (test_installer_r8_recovery.InstallerR8Recovery.test_recovery_without_manifest_reports_nothing_to_roll_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tools/tests/test_installer_r8_recovery.py", line 214, in test_recovery_without_manifest_reports_nothing_to_roll_back # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+    (w / 'manifest').unlink()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "<hermes>/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/pathlib/__init__.py", line 1042, in unlink # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+    os.unlink(self)
+    ~~~~~~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '<profile>/cache/scratch/tmp2_95ia0_/manifest' # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+
+======================================================================
+FAIL: test_restore_missing_awgctl_backup_fails_closed (test_installer_r8_recovery.InstallerR8Recovery.test_restore_missing_awgctl_backup_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tools/tests/test_installer_r8_recovery.py", line 146, in test_restore_missing_awgctl_backup_fails_closed # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+    self.assertNotEqual(r.returncode, 0, r.stderr)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0 : 
+
+======================================================================
+FAIL: test_restore_missing_header_backup_fails_closed (test_installer_r8_recovery.InstallerR8Recovery.test_restore_missing_header_backup_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tools/tests/test_installer_r8_recovery.py", line 131, in test_restore_missing_header_backup_fails_closed # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+    self.assertNotEqual(r.returncode, 0, r.stderr)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 0 == 0 : 
+
+======================================================================
+FAIL: test_rollback_restores_kernel_sha256_member (test_installer_r8_recovery.InstallerR8Recovery.test_rollback_restores_kernel_sha256_member)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "<repo>/tools/tests/test_installer_r8_recovery.py", line 186, in test_rollback_restores_kernel_sha256_member # scan:allow-fixture[sha1:d1c7b3c65a8ace7b9e89e34725c5397c83fb8700]
+    self.assertEqual((w / 'kernel.SHA256').read_text(), 'PREVHASH  /bsd\n')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'OLDHASH  /bsd\n' != 'PREVHASH  /bsd\n'
+- OLDHASH  /bsd
+? ^^^
++ PREVHASH  /bsd
+? ^^^^
+
+
+----------------------------------------------------------------------
+Ran 6 tests in 5.008s
+
+FAILED (failures=3, errors=1)

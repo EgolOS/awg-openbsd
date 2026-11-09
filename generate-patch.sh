@@ -16,14 +16,37 @@ TAB="$(printf '\t')"
 
 patch_file() {
     local src="$1" dst_name="$2"
-    local ts
+    local ts rc tmp
+    [ -f "$src" ] || { echo "generate-patch: missing source $src" >&2; exit 1; }
     ts=$(date '+%a %b %e %T %Y')
-    diff -u /dev/null "$src" | awk \
-        -v ts="$ts" \
-        -v name="$dst_name" \
+    tmp=$(mktemp "${TMPDIR:-/tmp}/awgdiff.XXXXXX") || exit 1
+    # diff exits 0 (same) or 1 (differ) for a good run; >1 means trouble.
+    # The pipeline used to hide that behind awk's status (R4-03).
+    rc=0; diff -u /dev/null "$src" > "$tmp" || rc=$?
+    [ "$rc" -le 1 ] || { echo "generate-patch: diff of $src failed (rc $rc)" >&2; rm -f "$tmp"; exit 1; }
+    awk -v ts="$ts" -v name="$dst_name" \
         'NR==1 { print "--- /dev/null" "\t" ts; next }
          NR==2 { print "+++ " name "\t" ts; next }
-         { print }'
+         { print }' "$tmp" || { echo "generate-patch: awk of $src failed" >&2; rm -f "$tmp"; exit 1; }
+    rm -f "$tmp"
+}
+
+# Modification hunk: the pre-change upstream file is kept next to the patched
+# one (kern_pledge.c.orig) so the generated hunk carries real context.
+patch_modify() {   # patch_modify <orig> <patched> <dst_name>
+    local orig="$1" patched="$2" dst_name="$3"
+    local ts rc tmp
+    [ -f "$orig" ] || { echo "generate-patch: missing baseline $orig" >&2; exit 1; }
+    [ -f "$patched" ] || { echo "generate-patch: missing patched $patched" >&2; exit 1; }
+    ts=$(date '+%a %b %e %T %Y')
+    tmp=$(mktemp "${TMPDIR:-/tmp}/awgdiff.XXXXXX") || exit 1
+    rc=0; diff -u "$orig" "$patched" > "$tmp" || rc=$?
+    [ "$rc" -le 1 ] || { echo "generate-patch: diff of $orig vs $patched failed (rc $rc)" >&2; rm -f "$tmp"; exit 1; }
+    awk -v ts="$ts" -v name="$dst_name" \
+        'NR==1 { print "--- " name "\t" ts; next }
+         NR==2 { print "+++ " name "\t" ts; next }
+         { print }' "$tmp" || { echo "generate-patch: awk of $orig failed" >&2; rm -f "$tmp"; exit 1; }
+    rm -f "$tmp"
 }
 
 emit() {	# emit <output-file>
@@ -55,6 +78,15 @@ emit() {	# emit <output-file>
 @@ crypto/chachapoly.c
 + | awg
 EOF
+
+    # sys/kern/kern_pledge.c: stock OpenBSD does not name SIOCSAWG (223) or
+    # SIOCGAWG (224) in the PLEDGE_INET ioctl group, so a pledged management
+    # tool is SIGABRTed by the kernel. The hunk adds both cases (and the
+    # header that declares them) — see docs/SECURITY-AUDIT.md AWG-038.
+    printf '\n'                                                   >> "$out"
+    patch_modify "$REPODIR/src/kern_pledge.c.orig" \
+                 "$REPODIR/src/kern_pledge.c" \
+                 "sys/kern/kern_pledge.c" >> "$out"
 }
 
 # Compare two patch files ignoring the embedded timestamps.

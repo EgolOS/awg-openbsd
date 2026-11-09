@@ -8,7 +8,27 @@ tested as a unit.
 Findings are numbered (`AWG-0xx`) and tracked with state and regression test in
 [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md).
 
-## [Unreleased]
+## [Unreleased] — experimental release candidate
+
+Native AmneziaWG for OpenBSD 8.0 amd64 — `awg(4)` kernel driver plus the
+patched `ifconfig(8)`, `awgctl` and `awg-quick` — shipped as an experimental
+release candidate, not a production release. Verified on a two-VM
+OpenBSD↔OpenBSD pair (kernel `AWG.MP#11`): legacy 2.0 handshake, dual-stack
+ICMP and a 4 MiB bulk transfer with matching receiver byte count and sha256;
+3.1 with `S3`/`S4` and a shared header-protection key, dual stack, 4 MiB in
+each direction; recovery after a failed `up` puts the interface back to the
+pre-run snapshot of the address list, the MTU and the link up/down flag
+(`tools/tests/test_awgctl_r9_restore.py`). The evidence set (conformance
+ledger and run logs) ships separately on branch `test/network-matrix`
+(commit `25dc854`, the corrected ledger head); `make check` passes on the Fedora (Linux) host.
+Not verified: soak and leak measurement (R4-12), atomic peer-list
+replacement (R4-05), client interoperability (`amneziawg-go`, Android,
+Windows, Linux module), native kernel build/boot/install from this tree,
+native suite portability (the OpenBSD laptop `make check-tests` run did not
+complete), live `awgctl` ioctl behaviour beyond the host fixtures, and a
+1-vCPU performance baseline; the conformance ledger marks 7 of its 10
+feature rows VERIFIED, the rest NOT RUN. Full notes:
+[docs/RELEASE-NOTES.md](docs/RELEASE-NOTES.md).
 
 ### Security
 

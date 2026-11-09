@@ -23,6 +23,7 @@ CONFIG_FILE=""
 PRIVATE_KEY=""
 LISTEN_PORT=""
 ADDRESSES=( )
+ADDRESS_FAMILIES=( )
 MTU=""
 DNS=( )
 DNS_SEARCH=( )
@@ -57,6 +58,7 @@ FIRSTADDR6=""
 ENDPOINTS=( )
 GATEWAY4=""
 GATEWAY6=""
+ENDPOINT_FAMILY="inet"   # family the Address selects; the endpoint resolves in it
 
 cmd() {
 	# Redact even callers of the manual argv interface. Automated secret-key
@@ -136,6 +138,14 @@ parse_options() {
 	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
 	trusted_config_path "$CONFIG_FILE"
 
+	# R8/R4-08: a config with NUL bytes or a truncated last line is
+	# refused before any field is applied — the bytes behind a NUL and
+	# behind the cut must not reach the interface.
+	[[ $(tr -dc '\0' < "$CONFIG_FILE" | wc -c) -eq 0 ]] \
+		|| die "\`$CONFIG_FILE' contains NUL bytes"
+	[[ $(tail -c 1 "$CONFIG_FILE" | wc -l) -eq 1 ]] \
+		|| die "\`$CONFIG_FILE' has a truncated last line"
+
 	# The config holds the long-term private key and can carry PreUp/PostUp
 	# commands that run as root. Refuse one other users can read.
 	local mode
@@ -178,7 +188,7 @@ parse_options() {
 			Address)               ADDRESSES+=( ${value//,/ } ) ;;
 			MTU)                   MTU="$value" ;;
 			DNS) for v in ${value//,/ }; do
-				[[ $v =~ (^[0-9.]+$)|(^.*:.*$) ]] && DNS+=( "$v" ) || DNS_SEARCH+=( "$v" )
+				validate_dns "$v"
 			done ;;
 			Table)                 TABLE="$value" ;;
 			PreUp)                 PRE_UP+=( "$value" ) ;;
@@ -236,7 +246,11 @@ parse_options() {
 	# into ifconfig arguments and shell arithmetic, so a non-numeric value
 	# is a code-execution vector, not a config error.
 	[[ -z $LISTEN_PORT ]] || need_uint ListenPort "$LISTEN_PORT" 65535
-	[[ -z $MTU ]] || need_uint MTU "$MTU" 65535
+	# MTU: the wire MTU of an awg(4) interface is 576..9000 (R8).
+	if [[ -n $MTU ]]; then
+		need_uint MTU "$MTU" 9000
+		(( 10#$MTU >= 576 )) || die "MTU must be 576..9000, got \`$MTU'"
+	fi
 	[[ -z $JC ]] || need_uint Jc "$JC" 64
 	[[ -z $JMIN ]] || need_uint Jmin "$JMIN" 1500
 	[[ -z $JMAX ]] || need_uint Jmax "$JMAX" 1500
@@ -294,6 +308,21 @@ parse_bool() {
 		(( 10#$value != 0 )) && echo 1 || echo 0
 	else
 		die "$name: boolean value is neither on/off nor 0/1: \`$2'"
+	fi
+}
+
+# validate_dns <v>: an IPv4 (octet ranges) or IPv6 entry is a resolver
+# address and is validated as one; anything else is a search domain (R8).
+validate_dns() {
+	local v="$1"
+	if [[ $v =~ ^[0-9.]+$ ]]; then
+		is_ipv4 "$v" || die "DNS '$v' is not a valid IPv4 address"
+		DNS+=( "$v" )
+	elif [[ $v == *:* ]]; then
+		is_ipv6 "${v%%\%*}" || die "DNS '$v' is not a valid IPv6 address"
+		DNS+=( "$v" )
+	else
+		DNS_SEARCH+=( "$v" )
 	fi
 }
 
@@ -358,102 +387,226 @@ up_if() {
 	cmd ifconfig "$REAL_INTERFACE" up
 }
 
-# Configure AWG interface via ifconfig — no 'awg' tool needed
-set_config() {
+# Configure AWG interface via ifconfig — no 'awg' tool needed.
+#
+# R4-08: parsing, resolution and serialisation happen in prepare_config,
+# *before* any mutation, so a bad PrivateKey, peer endpoint, allowed-IP or
+# address fails before the interface is created. build_config_args serialises
+# the argument vector (and the stdin key list); apply_config performs the
+# single ifconfig mutation with it.
+# validate_endpoint <ep>: host:port with the port in 1..65535; the host is a
+# bracketed IPv6, a plain IPv4 (octets range-checked) or an RFC 1123
+# hostname. R8/R4-08: resolved here, serialised into CONFIG_ARGS, so the
+# single ifconfig mutation receives a complete, valid endpoint.
+# R9/R4-08b: the resolution happens here too — a hostname is turned into a
+# numeric address of ENDPOINT_FAMILY before the interface is created, so a
+# name that does not resolve exits with nothing created.
+validate_endpoint() {
+	local ep="$1" host port addr
+	if [[ $ep =~ ^\[(.+)\]:([0-9]+)$ ]]; then
+		host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
+		is_ipv6 "$host" \
+			|| die "Peer endpoint '$ep' is not a valid [IPv6]:port"
+	elif [[ $ep =~ ^([^:]+):([0-9]+)$ ]]; then
+		host="${BASH_REMATCH[1]}"; port="${BASH_REMATCH[2]}"
+		is_ipv4 "$host" || is_hostname "$host" \
+			|| die "Peer endpoint '$ep' is not a valid host:port"
+	else
+		die "Peer endpoint '$ep' is not host:port"
+	fi
+	(( 10#$port >= 1 && 10#$port <= 65535 )) \
+		|| die "Peer endpoint '$ep' has an invalid port (1..65535)"
+	addr="$(resolve_endpoint_host "$host")" \
+		|| die "Peer endpoint '$ep' does not resolve to an $ENDPOINT_FAMILY address"
+	CONFIG_ARGS+=( awgendpoint "$addr" "$port" )
+}
+
+build_config_args() {
 	local -
 	set -f
-	local args=() keys=( "$PRIVATE_KEY" )
+	CONFIG_ARGS=() CONFIG_KEYS=( "$PRIVATE_KEY" )
 
 	[[ -n $PRIVATE_KEY ]] || die "no PrivateKey"
-	args+=( awgversion "$VERSION" )
+	CONFIG_ARGS+=( awgversion "$VERSION" )
 	# All secret keys are fed on stdin in argv order: the argument vector of a
 	# root process is readable with ps(1) and lands in core dumps.
-	args+=( awgkey - )
-	[[ -n $LISTEN_PORT ]] && args+=( awgport "$LISTEN_PORT" )
+	CONFIG_ARGS+=( awgkey - )
+	[[ -n $LISTEN_PORT ]] && CONFIG_ARGS+=( awgport "$LISTEN_PORT" )
 
 	# AWG obfuscation params
 	if [[ -n $JC || -n $JMIN || -n $JMAX ]]; then
-		args+=( awgjc  "${JC:-0}"  awgjmin "${JMIN:-0}" awgjmax "${JMAX:-0}" )
+		CONFIG_ARGS+=( awgjc  "${JC:-0}"  awgjmin "${JMIN:-0}" awgjmax "${JMAX:-0}" )
 	fi
 	if [[ -n $S1 || -n $S2 ]]; then
-		args+=( awgs1 "${S1:-0}" awgs2 "${S2:-0}" )
+		CONFIG_ARGS+=( awgs1 "${S1:-0}" awgs2 "${S2:-0}" )
 	fi
 	if [[ -n $H1 || -n $H2 || -n $H3 || -n $H4 ]]; then
-		args+=( awgh1 "${H1:-1}" awgh2 "${H2:-2}" awgh3 "${H3:-3}" awgh4 "${H4:-4}" )
+		CONFIG_ARGS+=( awgh1 "${H1:-1}" awgh2 "${H2:-2}" awgh3 "${H3:-3}" awgh4 "${H4:-4}" )
 	fi
 
 	# AWG 3.1 params
-	[[ -n $S3 ]] && args+=( awgs3 "$S3" )
-	[[ -n $S4 ]] && args+=( awgs4 "$S4" )
+	[[ -n $S3 ]] && CONFIG_ARGS+=( awgs3 "$S3" )
+	[[ -n $S4 ]] && CONFIG_ARGS+=( awgs4 "$S4" )
 	local n
 	for (( n=0; n<5; n++ )); do
-		[[ -n ${ISPECS[$n]} ]] && args+=( "awgi$(( n + 1 ))" "${ISPECS[$n]}" )
+		[[ -n ${ISPECS[$n]} ]] && CONFIG_ARGS+=( "awgi$(( n + 1 ))" "${ISPECS[$n]}" )
 	done
-	if [[ -n $HPK ]]; then args+=( awghpk - ); keys+=( "$HPK" ); fi
-	[[ -n $CPA ]] && args+=( awgcpa "$CPA" )
-	[[ -n $REKEY_AFTER_TIME ]] && args+=( awgrekeyaftertime "$REKEY_AFTER_TIME" )
-	[[ -n $REKEY_TIMEOUT ]] && args+=( awgrekeytimeout "$REKEY_TIMEOUT" )
-	[[ -n $REJECT_AFTER_TIME ]] && args+=( awgrejectaftertime "$REJECT_AFTER_TIME" )
-	[[ -n $KEEPALIVE_TIMEOUT ]] && args+=( awgkeepalivetimeout "$KEEPALIVE_TIMEOUT" )
-	[[ -n $MAX_HANDSHAKE_ATTEMPTS ]] && args+=( awgmaxhandshakeattempts "$MAX_HANDSHAKE_ATTEMPTS" )
+	if [[ -n $HPK ]]; then CONFIG_ARGS+=( awghpk - ); CONFIG_KEYS+=( "$HPK" ); fi
+	[[ -n $CPA ]] && CONFIG_ARGS+=( awgcpa "$CPA" )
+	[[ -n $REKEY_AFTER_TIME ]] && CONFIG_ARGS+=( awgrekeyaftertime "$REKEY_AFTER_TIME" )
+	[[ -n $REKEY_TIMEOUT ]] && CONFIG_ARGS+=( awgrekeytimeout "$REKEY_TIMEOUT" )
+	[[ -n $REJECT_AFTER_TIME ]] && CONFIG_ARGS+=( awgrejectaftertime "$REJECT_AFTER_TIME" )
+	[[ -n $KEEPALIVE_TIMEOUT ]] && CONFIG_ARGS+=( awgkeepalivetimeout "$KEEPALIVE_TIMEOUT" )
+	[[ -n $MAX_HANDSHAKE_ATTEMPTS ]] && CONFIG_ARGS+=( awgmaxhandshakeattempts "$MAX_HANDSHAKE_ATTEMPTS" )
 	case "$RANDOM_TRAILERS" in
-	1) args+=( awgrandomtrailers ) ;;
-	0) args+=( -awgrandomtrailers ) ;;
+	1) CONFIG_ARGS+=( awgrandomtrailers ) ;;
+	0) CONFIG_ARGS+=( -awgrandomtrailers ) ;;
 	esac
 	case "$DISABLE_COOKIES" in
-	1) args+=( awgdisablecookies ) ;;
-	0) args+=( -awgdisablecookies ) ;;
+	1) CONFIG_ARGS+=( awgdisablecookies ) ;;
+	0) CONFIG_ARGS+=( -awgdisablecookies ) ;;
 	esac
 
-	# Peers
-	local i
+	# Peers: the endpoint must be host:port (bracketed for IPv6) and every
+	# allowed-IP must be an address with a 0..128 prefix, validated here so a
+	# malformed peer fails before the interface is touched.
+	local i aip
 	for (( i=0; i<PEER_COUNT; i++ )); do
-		args+=( awgpeer "${PEER_PUBKEYS[$i]}" )
+		CONFIG_ARGS+=( awgpeer "${PEER_PUBKEYS[$i]}" )
 		if [[ -n ${PEER_PSKS[$i]} ]]; then
-			args+=( awgpsk - ); keys+=( "${PEER_PSKS[$i]}" )
+			CONFIG_ARGS+=( awgpsk - ); CONFIG_KEYS+=( "${PEER_PSKS[$i]}" )
 		fi
-		[[ -n ${PEER_PKAS[$i]} ]]      && args+=( awgpka      "${PEER_PKAS[$i]}" )
-		if [[ -n ${PEER_ENDPOINTS[$i]} ]]; then
-			local ep="${PEER_ENDPOINTS[$i]}"
-			# handle [::1]:port IPv6 format
-			if [[ $ep =~ ^\[(.+)\]:([0-9]+)$ ]]; then
-				args+=( awgendpoint "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" )
-			elif [[ $ep =~ ^(.+):([0-9]+)$ ]]; then
-				args+=( awgendpoint "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" )
-			fi
+		[[ -n ${PEER_PKAS[$i]} ]] && CONFIG_ARGS+=( awgpka "${PEER_PKAS[$i]}" )
+		local ep="${PEER_ENDPOINTS[$i]}"
+		if [[ -n $ep ]]; then
+			validate_endpoint "$ep"
 		fi
-		local aip
 		for aip in ${PEER_AIPS[$i]}; do
-			args+=( awgaip "$aip" )
+			validate_cidr "$aip" "AllowedIPs"
+			CONFIG_ARGS+=( awgaip "$aip" )
 		done
 	done
-
-	printf '%s\n' "${keys[@]}" | cmd ifconfig "$REAL_INTERFACE" "${args[@]}"
 }
 
-add_addr() {
-	local family
-	if [[ $1 == *:* ]]; then
-		family=inet6
-		[[ -n $FIRSTADDR6 ]] || FIRSTADDR6="${1%/*}"
+apply_config() {
+	printf '%s\n' "${CONFIG_KEYS[@]}" | cmd ifconfig "$REAL_INTERFACE" "${CONFIG_ARGS[@]}"
+}
+
+# prepare_config parses, resolves and serialises everything that does not
+# mutate the interface: private key, address families/prefixes, the peer
+# endpoint and allowed-IP argument vector, and the MTU from the endpoint
+# route. cmd_up calls this once before add_if (R4-08).
+prepare_config() {
+	[[ -n $PRIVATE_KEY ]] || die "no PrivateKey"
+	local i
+	ADDRESS_FAMILIES=()
+	for (( i=0; i<${#ADDRESSES[@]}; i++ )); do
+		validate_cidr "${ADDRESSES[$i]}" "Address"
+		[[ "${ADDRESSES[$i]}" == *:* ]] && ADDRESS_FAMILIES+=( inet6 ) \
+			|| ADDRESS_FAMILIES+=( inet )
+	done
+	# R9/R4-08b: the underlay the tunnel traffic leaves through is the
+	# Address family, so the peer endpoint resolves in that family (inet
+	# when the config carries no Address). build_config_args resolves the
+	# endpoint with it, before add_if creates the interface.
+	[[ ${#ADDRESS_FAMILIES[@]} -gt 0 ]] && ENDPOINT_FAMILY="${ADDRESS_FAMILIES[0]}"
+	build_config_args
+	resolve_mtu
+}
+
+# R8/R4-08: the address grammar is resolved here (octet ranges, IPv6 form,
+# per-family prefix limits) so every field is fully parsed before the
+# interface is touched, not half-parsed by shape and finished by ifconfig.
+is_ipv4() {	# four octets, each 0..255
+	local o
+	[[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+	for o in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
+		 "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+		(( 10#$o <= 255 )) || return 1
+	done
+	return 0
+}
+
+is_ipv6() {	# full and compressed forms, 0..ffff per group
+	[[ $1 =~ ^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$ ]]
+}
+
+is_hostname() {	# RFC 1123 labels, for a resolvable Endpoint host
+	[[ $1 =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.?$ ]]
+}
+
+# resolve_endpoint_host <host>: the numeric address for an Endpoint host.
+# A numeric host is echoed as it is (no resolver call); a hostname goes to
+# getent(1) once per run — no cache — and the first answer of ENDPOINT_FAMILY
+# is echoed. Exit non-zero when the name yields no address of that family.
+resolve_endpoint_host() {
+	local host="$1" out addr
+	if is_ipv4 "$host" || is_ipv6 "$host"; then
+		printf '%s\n' "$host"
+		return 0
+	fi
+	out="$(getent hosts "$host" 2>/dev/null)" || return 1
+	for addr in $out; do
+		case "$addr" in *[!0-9a-fA-F:.]*) continue ;; esac
+		if [[ $ENDPOINT_FAMILY == inet6 ]]; then
+			is_ipv6 "$addr" || continue
+		else
+			is_ipv4 "$addr" || continue
+		fi
+		printf '%s\n' "${addr%%\%*}"
+		return 0
+	done
+	return 1
+}
+
+# validate_cidr <cidr> <label>: address with an optional prefix, 0..32 for
+# IPv4 and 0..128 for IPv6 (R8: the prefix limit follows the family).
+validate_cidr() {
+	local cidr="$1" label="$2" addr="${1}" prefix=""
+	[[ "$cidr" == "*" ]] && return 0   # wildcard: every address
+	case "$cidr" in
+	*/*) addr="${cidr%/*}"; prefix="${cidr#*/}" ;;
+	esac
+	if [[ "$addr" == *:* ]]; then
+		is_ipv6 "${addr%%\%*}" \
+			|| die "$label '$cidr' is not a valid IPv6 address"
+		[[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 128 ) ]] \
+			|| die "$label '$cidr' has an invalid prefix (IPv6: 0..128)"
 	else
-		family=inet
-		[[ -n $FIRSTADDR4 ]] || FIRSTADDR4="${1%/*}"
+		is_ipv4 "$addr" \
+			|| die "$label '$cidr' is not a valid IPv4 address"
+		[[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 32 ) ]] \
+			|| die "$label '$cidr' has an invalid prefix (IPv4: 0..32)"
 	fi
-	cmd ifconfig "$REAL_INTERFACE" $family "$1" alias
 }
 
-set_mtu() {
-	local mtu=0 endpoint output family host
-	if [[ -n $MTU ]]; then
-		cmd ifconfig "$REAL_INTERFACE" mtu "$MTU"
-		return
-	fi
+# add_addresses installs the pre-serialised addresses (family decided at parse
+# time), so no address is parsed after the interface exists.
+add_addresses() {
+	local i addr family
+	for (( i=0; i<${#ADDRESSES[@]}; i++ )); do
+		addr="${ADDRESSES[$i]}"
+		family="${ADDRESS_FAMILIES[$i]}"
+		if [[ $family == inet6 ]]; then
+			[[ -n $FIRSTADDR6 ]] || FIRSTADDR6="${addr%/*}"
+		else
+			[[ -n $FIRSTADDR4 ]] || FIRSTADDR4="${addr%/*}"
+		fi
+		cmd ifconfig "$REAL_INTERFACE" "$family" "$addr" alias
+	done
+}
+
+# resolve_mtu computes MTU_VALUE from the endpoint routes (read-only);
+# apply_mtu writes it to the interface.
+resolve_mtu() {
+	MTU_VALUE="$MTU"
+	[[ -n $MTU ]] && return
+	local mtu=0 endpoint output family host iface ifmtu
 	local i
 	for (( i=0; i<PEER_COUNT; i++ )); do
 		endpoint="${PEER_ENDPOINTS[$i]}"
 		[[ -n $endpoint ]] || continue
-		if [[ $endpoint =~ ^\[(.+)\]:[0-9]+$ ]]; then
+		if [[ $endpoint =~ ^\[(.+)\\]:[0-9]+$ ]]; then
 			host="${BASH_REMATCH[1]}"; family=inet6
 		elif [[ $endpoint =~ ^(.+):[0-9]+$ ]]; then
 			host="${BASH_REMATCH[1]}"
@@ -462,20 +615,21 @@ set_mtu() {
 			continue
 		fi
 		output="$(route -n get "-$family" "$host" 2>/dev/null || true)"
-		local iface
 		[[ $output =~ interface:\ ([^ $'\n']+) ]] && iface="${BASH_REMATCH[1]}" || continue
-		local ifmtu
 		[[ $(ifconfig "$iface" 2>/dev/null) =~ mtu\ ([0-9]+) ]] && ifmtu="${BASH_REMATCH[1]}" || continue
 		[[ $ifmtu -gt $mtu ]] && mtu=$ifmtu
 	done
 	if [[ $mtu -eq 0 ]]; then
 		output="$(route -n get default 2>/dev/null || true)"
-		local iface
 		[[ $output =~ interface:\ ([^ $'\n']+) ]] && iface="${BASH_REMATCH[1]}" || true
 		[[ -n $iface && $(ifconfig "$iface" 2>/dev/null) =~ mtu\ ([0-9]+) ]] && mtu="${BASH_REMATCH[1]}"
 	fi
 	[[ $mtu -gt 0 ]] || mtu=1500
-	cmd ifconfig "$REAL_INTERFACE" mtu $(( mtu - 80 ))
+	MTU_VALUE=$(( mtu - 80 ))
+}
+
+apply_mtu() {
+	cmd ifconfig "$REAL_INTERFACE" mtu "$MTU_VALUE"
 }
 
 collect_gateways() {
@@ -677,15 +831,19 @@ auto_su() {
 }
 
 cmd_up() {
+	# R4-08: parse, resolve and serialise the whole configuration first
+	# (private key, addresses, peer endpoints, allowed-IPs, MTU); only then
+	# mutate the interface. An operational failure after creation runs the
+	# existing trap (del_if; del_routes), which restores the state.
+	prepare_config
 	get_real_interface && die "\`$INTERFACE' already exists as \`$REAL_INTERFACE'"
 	trap 'del_if; del_routes; exit' INT TERM EXIT
 	add_if
 	execute_hooks "${PRE_UP[@]}"
-	set_config
+	apply_config
 	populate_endpoint_ips
-	local i
-	for i in "${ADDRESSES[@]}"; do add_addr "$i"; done
-	set_mtu
+	add_addresses
+	apply_mtu
 	up_if
 	set_dns
 	local aip all_aips=( ) peer_aips=( )

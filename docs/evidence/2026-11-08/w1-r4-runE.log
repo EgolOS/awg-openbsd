@@ -1,0 +1,105 @@
+E start 2026-11-08T13:58:41Z
+==> Lock acquired: /var/db/awg-install/lock.d (pid 46113)
+==> Building as _awgbuild
+
+──── System packages ────
+==> Packages OK
+
+──── Kernel sources ────
+==> Kernel sources already present
+
+──── ifconfig — AWG support patch (build) ────
+Hmm...  Looks like a unified diff to me...
+The text leading up to this was:
+--------------------------
+|--- /usr/src/sbin/ifconfig/ifconfig.c.orig	Tue Oct 20 09:21:48 2026
+|+++ /usr/src/sbin/ifconfig/ifconfig.c	Tue Oct 20 09:21:48 2026
+--------------------------
+Patching file /usr/src/.awg-install.pwsrLF/ifconfig.c using Plan A...
+Hunk #1 succeeded at 82.
+Hunk #2 succeeded at 366.
+Hunk #3 succeeded at 440.
+Hunk #4 succeeded at 704.
+Hunk #5 succeeded at 822.
+Hunk #6 succeeded at 1073.
+Hunk #7 succeeded at 3504.
+Hunk #8 succeeded at 6152.
+done
+Hmm...  Looks like a unified diff to me...
+The text leading up to this was:
+--------------------------
+|--- /usr/src/sbin/ifconfig/ifconfig.c.orig	Tue Oct 20 09:21:48 2026
+|+++ /usr/src/sbin/ifconfig/ifconfig.c	Tue Oct 20 09:21:48 2026
+--------------------------
+Patching file /usr/src/.awg-install.pwsrLF/ifconfig.c using Plan A...
+Hunk #1 succeeded at 82.
+Hunk #2 succeeded at 366.
+Hunk #3 succeeded at 440.
+Hunk #4 succeeded at 704.
+Hunk #5 succeeded at 822.
+Hunk #6 succeeded at 1073.
+Hunk #7 succeeded at 3504.
+Hunk #8 succeeded at 6152.
+done
+==> Handing /usr/src/sbin/ifconfig to build user _awgbuild
+==> Building ifconfig
+==> building as _awgbuild
+cc -O2 -pipe   -MD -MP  -c ifconfig.c
+cc   -o ifconfig ifconfig.o brconfig.o sff.o -lutil -lm
+==> ifconfig built: /usr/src/sbin/ifconfig/ifconfig
+
+──── awgctl — management tool (build) ────
+==> Handing /home/user/rc2h-1794146083/sbin/awgctl to build user _awgbuild
+==> Building awgctl
+==> building as _awgbuild
+==> awgctl built: /home/user/rc2h-1794146083/sbin/awgctl/awgctl
+
+──── AWG kernel driver ────
+==> Copying driver files to /usr/src/sys/net/
+==> kern/kern_pledge.c already carries SIOCSAWG/SIOCGAWG
+==> conf/files already patched
+==> Handing /usr/src/sys to build user _awgbuild
+==> Configuring AWG.MP
+cd /home/build/sys/arch/amd64/compile/AWG.MP/obj && config -s /home/build/sys -b /home/build/sys/arch/amd64/compile/AWG.MP/obj /home/build/sys/arch/amd64/conf/AWG.MP
+==> Building kernel — this takes ~15 minutes (log: /tmp/awg-install-log.w1HqQ3)
+
+──── Publish kernel + management tool (transactional) ────
+
+──── Backup pair (generation 10) ────
+==> Backed up the pair: /bsd.awg-prev.10 + /sbin/ifconfig.awg-prev.10 (manifest: /var/db/awg-install/manifest)
+==> ifconfig installed to /sbin/ifconfig
+
+──── Publish kernel ────
+==> Verified /usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd (31399930 bytes, awg symbols present)
+==> Staging kernel to /bsd.awg-staging
+==> Kernel installed to /bsd — reboot to activate
+==> If it does not boot: at the boot prompt, 'boot /bsd.awg-prev.10'; after boot, sh /home/user/rc2h-1794146083/install.sh --rollback
+==> awgctl installed to /usr/local/sbin/awgctl
+==> Recorded the installed pair in /var/db/awg-install/manifest
+==> Published generation 10: /bsd + /sbin/ifconfig + header + awgctl
+
+──── awg-quick ────
+==> awg-quick installed to /usr/local/sbin/awg-quick
+
+──── pf MSS clamping for awg interfaces ────
+==> Suggested rule (not applied; rerun with --pf to add it):
+        match on awg scrub (max-mss 1380)
+
+==========================================
+ AmneziaWG install complete
+==========================================
+
+REBOOT REQUIRED to load the AWG kernel.
+
+After reboot:
+  uname -v                   # verify AWG.MP kernel
+  ifconfig awg0 create       # verify awg device
+
+Place your config:
+  /etc/amnezia/amneziawg/<name>.conf
+
+Then: awg-quick up <name>
+
+Log: /tmp/awg-install-log.w1HqQ3
+E rc=0
+E bsd sha: 20c025a8a419f11016f68bcf7261d92b37da0e886b572100ce9d7bf2cd674b47

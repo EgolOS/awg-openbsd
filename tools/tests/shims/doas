@@ -1,0 +1,6 @@
+#!/bin/sh
+# doas shim: record the command, then run it so the builder tools (make,
+# config) actually execute in the caller's working directory.
+printf '%s\n' "$*" >> "$CMDFILE"
+shift 2
+exec "$@"

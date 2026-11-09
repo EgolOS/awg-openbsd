@@ -1,0 +1,4 @@
+#!/bin/sh
+# chown shim: record and succeed (the sandbox has no _awgbuild account).
+[ -n "$CMDFILE" ] && printf 'chown %s\n' "$*" >> "$CMDFILE"
+exit 0

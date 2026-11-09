@@ -27,7 +27,7 @@ class InstallerSource(unittest.TestCase):
             match = re.search(r'(?ms)^verify_ifconfig_source\(\) \{.*?^\}', source)
             self.assertIsNotNone(match, 'installer needs a fail-closed source identity gate')
             shim = w / 'sha256'
-            shim.write_text('#!/usr/bin/python3\nimport hashlib,sys\nprint(hashlib.sha256(open(sys.argv[-1],"rb").read()).hexdigest())\n')
+            shim.write_text('#!/usr/bin/env python3\nimport hashlib,sys\nprint(hashlib.sha256(open(sys.argv[-1],"rb").read()).hexdigest())\n')
             shim.chmod(0o700)
             script = 'set -eu\ndie() { echo "$*" >&2; exit 1; }\n' + match.group() + '\nverify_ifconfig_source "$1" "$2"\n'
             env = dict(os.environ, PATH=str(w)+':'+os.environ['PATH'])

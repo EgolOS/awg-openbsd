@@ -1,0 +1,326 @@
+.\" $OpenBSD$
+.\"
+.\" Copyright (C) 2026 Andrey Orekhov <pieceofcakecupofcoffee@gmail.com>
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.Dd $Mdocdate: November 8 2026 $
+.Dt AWGCTL 8
+.Os
+.Sh NAME
+.Nm awgctl
+.Nd manage AmneziaWG (awg) network interfaces
+.Sh SYNOPSIS
+.Nm
+.Cm up
+.Ar name
+.Pq Oo Fl -config Ar path Oc
+.Nm
+.Cm down
+.Ar name
+.Nm
+.Cm show
+.Oo Ar name Oc
+.Nm
+.Cm set
+.Ar name
+.Ar key value ...
+.Nm
+.Cm add
+.Ar name
+.Cm peer
+.Ar pubkey
+.Oo Cm endpoint Ar addr:port Oo
+.Oo Cm allowed-ips Ar list Oc
+.Oo Cm psk Ar key Oc
+.Oo Cm keepalive Ar N Oc
+.Nm
+.Cm del
+.Ar name
+.Cm peer
+.Ar pubkey
+.Sh DESCRIPTION
+The
+.Nm
+utility configures AmneziaWG interfaces of the
+.Xr awg 4
+driver.
+It is a standalone replacement for the
+.Xr ifconfig 8
+AmneziaWG keywords: interface creation and destruction shell out to the
+stock
+.Xr ifconfig 8
+.Pq Dv SIOCIFCREATE2
+while every other parameter is applied with one
+.Dv SIOCSAWG
+set or
+.Dv SIOCGAWG
+get on
+.Va struct awg_data_io .
+.Pp
+The subcommands are:
+.Bl -tag -width Ds
+.It Cm up Ar name Oo Fl -config Ar path Oc
+Read the configuration (default
+.Pa /etc/amnezia/amneziawg/Ar name.conf ) ,
+create
+.Ar name
+if it does not exist, apply the whole configuration in a single
+.Dv SIOCSAWG ,
+replacing the peer list with the file's
+.Ic [Peer]
+sections,
+set any
+.Ic Address
+entries and
+.Ic MTU ,
+and bring the interface up.
+Applying the same file twice is idempotent.
+The address is verified by reading the interface back: the comparison uses
+the parsed address bytes, the address family and the prefix length.
+A netmask must be a contiguous run of ones, and an entry without a netmask
+does not prove an explicitly given prefix, so such an entry is not a match.
+An IPv6 scope (the
+.Ql % Ar iface
+suffix of a link-local address) is not part of the address bytes: it is
+stripped before the comparison and ignored.
+.It Cm down Ar name
+Remove all peers, bring
+.Ar name
+down and destroy the interface.
+.It Cm show Oo Ar name Oc
+Print the current kernel state, one field per line, in a stable order:
+.Ic awgport ,
+.Ic awgrtable ,
+.Ic awgpubkey ,
+.Ic awgversion ,
+.Ic awgjc ,
+.Ic awgjmin ,
+.Ic awgjmax ,
+.Ic awgs1 Ns - Ns Ic awgs4 ,
+.Ic awgh1 Ns - Ns Ic awgh4 ,
+.Ic awgi1 Ns - Ns Ic awgi5 ,
+.Ic awghpk ,
+.Ic awgcpa ,
+the five timing keys,
+.Ic awgrandomtrailers ,
+.Ic awgdisablecookies ,
+then each peer with its
+.Ic awgpeer
+public key,
+.Ic awgpsk ,
+.Ic awgpka ,
+.Ic awgendpoint ,
+transmit/receive counters, last handshake and
+.Ic awgaip
+entries.
+Only public keys are printed; the private key is never shown.
+Without
+.Ar name ,
+every
+.Ic awg Ns Ar N
+interface is shown.
+.It Cm set Ar name Ar key value ...
+Apply the given interface keys in one
+.Dv SIOCSAWG .
+Keys use the configuration file spelling
+.Pq Ic PrivateKey , Ic ListenPort , Ic Table , Ic Version , Ic Jc , ...
+A value of
+.Dq -
+reads that value from standard input, which keeps
+.Ic PrivateKey
+and
+.Ic HeaderProtectionKey
+out of the argument vector.
+Fields the kernel groups (Jc/Jmin/Jmax, S1/S2, H1\-H4) are read back from
+the interface first, so a partial set keeps the siblings it does not name.
+The read and the write are two separate ioctls, so the contract is
+last-writer-wins: a concurrent writer that commits between them is not
+detected, and the last
+.Dv SIOCSAWG
+wins per field group.
+The kernel has no generation counter, so no compare-and-swap token is
+checked; an unrelated
+.Ic set
+still writes back only the fields it reads as siblings.
+.Pp
+.It Cm add Ar name Cm peer Ar pubkey Oo ... Oc
+Add (or update) one peer with an endpoint, allowed IPs, preshared key
+and persistent keepalive.
+A
+.Ic psk
+of
+.Dq -
+reads the key from standard input.
+.It Cm del Ar name Cm peer Ar pubkey
+Remove one peer.
+.El
+.Ss Configuration file
+The file uses the wg-quick
+.Ic Key = value
+grammar with
+.Ic [Interface]
+and
+.Ic [Peer]
+sections and
+.Ic #
+comments; see
+.Xr awg-quick 8 .
+Interface keys:
+.Ic PrivateKey
+(required),
+.Ic ListenPort ,
+.Ic Address ,
+.Ic MTU ,
+.Ic DNS ,
+.Ic Table ,
+.Ic Version
+.Pq Ic legacy
+or
+.Ic 3.1 ,
+.Ic Jc ,
+.Ic Jmin ,
+.Ic Jmax ,
+.Ic S1 Ns - Ns Ic S4 ,
+.Ic H1 Ns - Ns Ic H4
+(single value or
+.Va low Ns - Ns Ar high
+range),
+.Ic I1 Ns - Ns Ic I5 ,
+.Ic HeaderProtectionKey ,
+.Ic ContentPaddingAddition ,
+.Ic RekeyAfterTime ,
+.Ic RekeyTimeout ,
+.Ic RejectAfterTime ,
+.Ic KeepaliveTimeout ,
+.Ic MaxHandshakeAttempts ,
+.Ic RandomTrailers
+.Pq Ic 0 Ns / Ic 1 Ns / Ic on Ns / Ic off
+and
+.Ic DisableCookies .
+Peer keys:
+.Ic PublicKey
+(required),
+.Ic PresharedKey ,
+.Ic Endpoint
+.Pq Ar host Ns : Ns Ar port
+or
+.Pq Oo Ar v6 Oc Ns : Ns Ar port ,
+resolved with
+.Fn getaddrinfo ,
+.Ic AllowedIPs
+(comma separated) and
+.Ic PersistentKeepalive .
+An unknown key refuses the whole file.
+The file must be mode 0600 (or 0400), root-owned, with root-owned and
+not group/other-writable ancestor directories.
+The
+.Ic DNS
+values are parsed but not applied by
+.Nm ;
+configure name resolution separately.
+.Ss Protocol versions
+A
+.Ic Version
+of
+.Ic legacy
+selects the AmneziaWG < 3.1 parameter set
+.Pq Ic Jc Ns / Ns Ic Jmin Ns / Ns Ic Jmax Ns / Ns Ic S1 Ns / Ns Ic S2 Ns / Ns Ic H1 Ns - Ns Ic H4 ;
+3.1 adds
+.Ic S3 ,
+.Ic S4 ,
+.Ic I1 Ns - Ns Ic I5 ,
+.Ic HeaderProtectionKey ,
+.Ic ContentPaddingAddition ,
+the five timing keys,
+.Ic RandomTrailers
+and
+.Ic DisableCookies .
+Without an explicit
+.Ic Version
+key, a file that sets any 3.1-only key selects 3.1, otherwise legacy.
+.Sh SECRET LIFETIME
+The private key, header protection key and preshared key are read into
+heap buffers and wiped with
+.Fn explicit_bzero
+when the parsed configuration is released, which happens on every exit
+path, including the
+.Fn err
+and
+.Fn errx
+paths that go through
+.Fn exit .
+A key given as a literal command argument is accepted (with a warning)
+and stays in the argument vector, where other local users can see it with
+.Xr ps 1
+until the kernel reclaims the process area; prefer
+.Dq -
+with the key on standard input.
+Three copies are outside the tool's reach and are not wiped: the kernel's
+copy of the key inside the interface structure (it lives until the field
+is replaced or the interface is destroyed),
+.Fn stdio
+buffers used while reading the file, and freed allocator chunks that the
+allocator may reuse.
+.Sh SYSTEM CALLS
+.Nm
+calls
+.Fn pledge
+with
+.Dq stdio rpath inet dns proc exec
+and
+.Fn unveil
+on
+.Pa /etc/amnezia/amneziawg
+(read) and
+.Pa /sbin/ifconfig
+(execute).
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev AWGCTL_DEBUG
+Print the SIOCGAWG size-probe trace (iteration, requested and returned
+size, errno) on stderr.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Bl -item
+.It
+0: success.
+.It
+1: usage error or I/O failure.
+.It
+2: configuration parse error.
+.It
+3:
+.Dv SIOCSAWG
+or
+.Dv SIOCGAWG
+ioctl failure.
+.El
+.Sh EXAMPLES
+.Bd -literal -offset indent
+# awgctl up awg9
+# awgctl show awg9
+# awgctl set awg9 ListenPort 51820
+# awgctl add awg9 peer QVZP... endpoint 192.0.2.1:51820 \\
+	allowed-ips 10.0.0.2/32,fd00::2/128 keepalive 25
+# awgctl del awg9 peer QVZP...
+# awgctl down awg9
+.Ed
+.Sh SEE ALSO
+.Xr awg 4 ,
+.Xr ifconfig 8 ,
+.Xr awg-quick 8
+.Rs
+.%A Amnezia
+.%T AmneziaWG protocol
+.Re
+.Sh HISTORY
+The
+.Nm
+utility first appeared in awg-openbsd 1.2 as the
+.Dq Option B
+management tool of
+.Pa docs/ADMIN-INTERFACE.md .

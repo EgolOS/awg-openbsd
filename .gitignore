@@ -20,7 +20,11 @@ tools/lab/install.conf
 *.iso
 *.img
 __pycache__/
-awgctl
+# E1-SOURCE: anchor the awgctl build-binary rules to exact paths so the
+# source directory sbin/awgctl/ (Makefile, awgctl.c, awgctl.8) stays
+# stageable; the unanchored pattern also ignored the whole directory.
+/awgctl
+/sbin/awgctl/awgctl
 manifest.kv
 # R6-N1 lock artifacts: the lock generation directory (gen-<N>) and its CAS
 # slot are runtime state next to $LOCKFILE, not sources.

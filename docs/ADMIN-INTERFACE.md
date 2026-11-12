@@ -215,3 +215,97 @@ wholesale; until then it is a second config path for no measured gain.
   deliberately reordered `awg_interface_io`; today the four lab gates
   (`docs/TESTING.md:31-41`) only catch a layout regression that breaks the
   handshake, not one that only changes `ifconfig awg0` output.
+
+## 7. Uninstall: the supported way back to stock
+
+`install.sh --uninstall` restores the original pre-AWG system state (the *stock
+baseline*, recorded as generation 1) using the same paired rollback machinery
+(`restore_generation_pair`) that `--rollback` uses. It then removes all AWG
+artifacts and the install database, leaving the R7 lock history intact.
+
+### 7.1 What is restored
+
+| Artifact | Restored to |
+| --- | --- |
+| `/bsd` | Stock kernel (generation 1 backup) |
+| `/sbin/ifconfig` | Stock ifconfig (generation 1 backup) |
+| `/usr/include/net/if_awg.h` | Removed (AWG addition; absent in stock) |
+| `/usr/local/sbin/awgctl` | Removed (AWG addition; absent in stock) |
+| `/var/db/kernel.SHA256` | Stock integrity DB (generation 1 backup) |
+| `/obsd` | Hardlink to restored `/bsd` if it existed pre-install; otherwise removed |
+| `/etc/pf.conf` | Restored from `/etc/pf.conf.awg.bak` if both existed pre-install; `.awg.bak` removed |
+| `/usr/local/sbin/awg-quick` | Removed if not present pre-install; preserved if it was |
+| `/usr/share/man/man8/awgctl.8` | Removed if not present pre-install; preserved if it was |
+| `/etc/amnezia/amneziawg/` | Preserved by default (user configs kept); removed with `--purge-configs` |
+
+### 7.2 What cannot be restored (irrecoverable)
+
+The installer modifies the following on a live system; uninstall does not and
+cannot revert them. The operator must handle these manually if a full rollback
+is required.
+
+| Artifact | Why |
+| --- | --- |
+| `/usr/share/man/man8/ifconfig.8` | Overwritten by `install.sh` at publish (line 574-575); stock manpage not backed up |
+| `bash` package | Installed via `pkg_add bash` (line 440-441); `pkg_delete` not attempted |
+| `/usr/src/sys/` tree | Patched by `fetch_sys_sources` + `install_pledge_hunk` + `conf/files` edits; no pre-install snapshot |
+| `/obsd` *pre-existing hardlink* | If `/obsd` was a hardlink to the original `/bsd` pre-install, uninstall restores it from the restored `/bsd`. If it was a distinct file, its content is not recorded. |
+| `/etc/pf.conf` *when no `.awg.bak` exists* | The installer creates `.awg.bak` on `--pf`; if the operator edited `pf.conf` after install without `.awg.bak`, the original is lost. |
+
+### 7.3 Usage
+
+```sh
+# Restore stock baseline, keep user configs (default)
+sh install.sh --uninstall
+
+# Also remove the config directory and its contents
+sh install.sh --uninstall --purge-configs
+
+# Skip the build user (useful if _awgbuild was removed)
+AWG_BUILD_USER=nosuchbuilder sh install.sh --uninstall
+```
+
+### 7.4 Failure modes (fail closed)
+
+* **Missing or corrupt generation 1 backups** — `stock baseline missing` or `stock baseline corrupt`; live AWG pair and all backups preserved.
+* **Missing pre-install inventory** — `stock baseline cannot be authenticated: no pre-install inventory`; applies to installs made before this feature.
+* **Generation 1 backup hash mismatch** — `stock baseline hash mismatch: kernel backup does not match pre-install inventory`; backup may be from a later generation.
+
+In all cases the script exits non-zero, the running AWG kernel and management tool are left untouched, and all recovery data (manifest, backups, inventory, lock history) remains in `/var/db/awg-install/` for manual inspection or a future attempt.
+
+### 7.5 Idempotency
+
+Running `--uninstall` on an already-uninstalled system (stock kernel live, no AWG artifacts) succeeds quietly with `Already uninstalled: stock baseline live, no AWG artifacts present`.
+
+### 7.6 VM verification (fixture evidence, not native)
+
+The fixture test suite (`tools/tests/test_installer_uninstall.py`) proves byte-identical restoration of every pair member, correct handling of non-pair artifacts via the pre-install inventory, fail-closed behavior on missing/corrupt metadata, and that generation 1 survives pruning across upgrades. Native OpenBSD verification requires a VM reboot between uninstall and the running-kernel check; the command block is:
+```
+# 1. Pre-install snapshot
+sha256 /bsd > /tmp/pre-bsd.sha256
+sha256 /sbin/ifconfig > /tmp/pre-ifc.sha256
+[ -f /obsd ] && sha256 /obsd > /tmp/pre-obsd.sha256
+[ -f /etc/pf.conf ] && sha256 /etc/pf.conf > /tmp/pre-pf.sha256
+
+# 2. Install + upgrade + uninstall
+sh install.sh --all
+# ... reboot, verify AWG ...
+sh install.sh --all  # upgrade
+# ... reboot, verify AWG ...
+sh install.sh --uninstall
+
+# 3. Post-uninstall filesystem checks (before reboot)
+sha256 /bsd | diff - /tmp/pre-bsd.sha256
+sha256 /sbin/ifconfig | diff - /tmp/pre-ifc.sha256
+[ -f /tmp/pre-obsd.sha256 ] && sha256 /obsd | diff - /tmp/pre-obsd.sha256
+[ -f /tmp/pre-pf.sha256 ] && sha256 /etc/pf.conf | diff - /tmp/pre-pf.sha256
+[ ! -f /usr/include/net/if_awg.h ]
+[ ! -f /usr/local/sbin/awgctl ]
+[ ! -f /usr/local/sbin/awg-quick ]
+[ ! -f /usr/share/man/man8/awgctl.8 ]
+[ ! -f /etc/pf.conf.awg.bak ]
+ls /bsd.awg-prev.* 2>/dev/null && exit 1 || :
+
+# 4. Reboot, then verify running kernel
+# uname -v | grep -q AWG.MP && exit 1 || :
+```

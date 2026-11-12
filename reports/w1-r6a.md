@@ -1,15 +1,17 @@
 # W1 — Round 6a: installer N5 staging + R4-14 packaging docs
 
-Tree: `~/.hermes/cache/scratch/awg-rc2/w1`, branch `feat/awgctl`, base `9ced40e`
-(maintainer WIP on top of the worker's `1ab1b43`). No push.
+Tree: `~/.hermes/cache/scratch/awg-rc2/w1` (out-of-tree workspace, not retained),
+branch `feat/awgctl`, base: the maintainer's WIP on top of the worker's change. No push.
+Those commit identities resolve in no ref of this repository, so none is cited.
 Evidence host: Fedora (Linux) — the installer is exercised through the sandboxed
 suite (`tools/tests/shims`, BSD `make`/`install`/`stat`/`mkdir` shims) plus the
 real host `cc` for the include-path proof.
 Commits (local): see `git log` — `install.sh` staging, shims+tests, docs.
 Unit suite: `python3 -m unittest discover -s tools/tests` → **Ran 76 tests …
 FAILED (failures=1, skipped=1)**; the single failure is the pre-existing
-`test_installer_r5_lock.test_two_reclaimers_barrier_exactly_one_wins` (lock lane,
-sibling worktree). `make check-syntax`/`check-py`/`check-patch` clean;
+sibling lock-lane test in another worktree (that run's test name was withdrawn
+in review: it exists in no ref of this repository, so it is not cited here).
+`make check-syntax`/`check-py`/`check-patch` clean;
 `check-scan` reports the 2 pre-existing `manifest.kv` home-path findings.
 
 | Item | Verdict | Command |
@@ -32,7 +34,8 @@ Reproduced with the **real script startup** first (not extracted functions):
 `IFAWG_STAGED=$WORK/if_awg.h` + `builder_make … CPPFLAGS=-I$WORK` put the header
 flat in `$WORK`, while the patched source includes `<net/if_awg.h>`
 (`sbin/ifconfig/ifconfig_awg.patch:7`), so the compiler resolves
-`$WORK/net/if_awg.h`. Recorded build log (WIP `9ced40e`):
+`$WORK/net/if_awg.h`. Recorded build log (WIP in the out-of-tree workspace; its
+commit identity is not cited):
 
 ```
 make CPPFLAGS=-I/tmp/awg-install-work.dXeU3M
@@ -89,8 +92,9 @@ marker is the staged header, and no root-level `/if_awg.h` appears.
 
 ## Notes for the next round
 
-- `test_installer_r5_lock.test_two_reclaimers_barrier_exactly_one_wins` fails
-  deterministically at `9ced40e` (both runs acquire; the WIP's `mv -T` → `mv`
+- The sibling lock-lane test in another worktree (name withdrawn in review — it
+  exists in no ref) fails  # observation, not current evidence
+  deterministically in that out-of-tree workspace (both runs acquire; the WIP's `mv -T` → `mv`
   change). Lock lane, sibling worktree — untouched here.
 - `tools/publish-scan.py` reports 2 `manifest.kv` home-path findings at HEAD
   (the `stat -f %z` shim's multi-line answer); the N6 per-rule allow table lives

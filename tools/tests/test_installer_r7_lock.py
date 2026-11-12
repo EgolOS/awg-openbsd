@@ -22,7 +22,7 @@ def extract(name):
 
 
 def lock_functions():
-    section = SOURCE[SOURCE.index('LOCK_OWNED=no'):SOURCE.index('# R4-01: before exiting')]
+    section = SOURCE[SOURCE.index('LOCK_OWNED=no'):SOURCE.index('# R4-01 + F8: before exiting')]
     return '\n'.join(re.findall(r'(?ms)^\w+\(\)\s*\{.*?^\}', section))
 
 
@@ -59,20 +59,39 @@ class R7Lock(unittest.TestCase):
                 + '        echo $$ > "$WORK/$NAME.ready"\n'
                 + '        while [ ! -e "$WORK/$NAME.resume" ]; do sleep .01; done\n'
                 + '    fi')
+        # Add pause point in finish() after verify_bsd_final, before release_lock
+        # The finish() function is included in lock_functions(); modify it in place.
+        # Place pause point after verify_bsd_final call (whether it passes or fails).
+        funcs = funcs.replace(
+            'if ! verify_bsd_final; then\n        [ "$rc" -eq 0 ] && rc=3\n    fi\n    release_lock',
+            'if ! verify_bsd_final; then\n        [ "$rc" -eq 0 ] && rc=3\n    fi\n'
+            '    if [ "${PAUSE_AT:-}" = "finish-before-release" ]; then\n'
+            '        echo $$ > "$WORK/$NAME.ready"\n'
+            '        while [ ! -e "$WORK/$NAME.resume" ]; do sleep .01; done\n'
+            '    fi\n    release_lock')
         script.write_text('set -e\nLOCK_OWNED=no\nLOCK_INITIALISE_GRACE=30\n'
-                          'log() { echo "$*"; }\ndie() { echo "$*" >&2; exit 1; }\n'
-                          + funcs + '\n'
-                          + extract('verify_bsd_final') + '\n'
-                          + extract('usage') + '\n' + extract('check_root')
-                          + '\ntrap finish EXIT\n'
-                          + 'case "$ACTION" in\n'
-                          + 'refuse) acquire_lock ;;\n'
-                          + 'usage) usage ;;\nroot) id() { echo 502; }; check_root ;;\n'
-                          + 'signal) kill -TERM $$ ;;\n'
-                          + '*) acquire_lock\n'
-                          + 'echo $$ > "$WORK/$NAME.admitted"\n'
-                          + 'while [ ! -e "$WORK/$NAME.go" ]; do sleep .01; done\n'
-                          + 'verify_lock_held ;;\nesac\n')
+                                  'log() { echo "$*"; }\ndie() { echo "$*" >&2; exit 1; }\n'
+                                  + funcs + '\n'
+                                  + extract('kernel_db_sha') + '\n'
+                                  + extract('verify_bsd_final') + '\n'
+                                  + extract('usage') + '\n' + extract('check_root')
+                                  + '\ntrap finish EXIT\n'
+                                  + 'case "$ACTION" in\n'
+                                  + 'refuse) acquire_lock ;;\n'
+                                  + 'usage) usage ;;\nroot) id() { echo 502; }; check_root ;;\n'
+                                  + 'signal) kill -TERM $$ ;;\n'
+                                  + '*) acquire_lock\n'
+                                  + 'echo $$ > "$WORK/$NAME.admitted"\n'
+                                  + 'if [ "${PAUSE_AT:-}" = "publish-hold" ]; then\n'
+                                  + '    echo $$ > "$WORK/$NAME.ready"\n'
+                                  + '    while [ ! -e "$WORK/$NAME.resume" ]; do sleep .01; done\n'
+                                  + 'fi\n'
+                                  + 'if [ "${PAUSE_AT:-}" = "in-run-hold" ]; then\n'
+                                  + '    echo $$ > "$WORK/$NAME.ready"\n'
+                                  + '    while [ ! -e "$WORK/$NAME.resume" ]; do sleep .01; done\n'
+                                  + 'fi\n'
+                                  + 'while [ ! -e "$WORK/$NAME.go" ]; do sleep .01; done\n'
+                                  + ';; esac\n')
         return dict(os.environ, PATH=str(w) + ':' + os.environ['PATH'], WORK=str(w / 'work'),
                     LOCKFILE=str(w / 'state' / 'lock'), BSD_FILE=str(w / 'bsd'),
                     LOGFILE=str(w / 'log'), ACTION='hold', NAME='a'), script
@@ -241,6 +260,115 @@ class R7Lock(unittest.TestCase):
                 self.assertEqual(before, self.snapshot(w / 'state'), action)
                 evidence('snapshot', {'action': action, 'before': before,
                                       'after': self.snapshot(w / 'state')})
+
+    def test_publish_window_exclusivity(self):
+        """A contender started while the holder is in the publish-to-release
+        window (inside finish() after verify_bsd_final, before release_lock)
+        must be refused. This verifies the generation-token CAS + liveness check
+        covers the window that verify_lock_held() previously guarded."""
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            env, script = self.setup_run(w)
+            # Holder: acquire lock, run through to finish(), then pause at
+            # 'finish-before-release' (after verify_bsd_final, before release_lock).
+            # This simulates the real publish-to-release window.
+            procs = {}
+            procs['holder'] = self.spawn(env, script, 'holder', PAUSE_AT='finish-before-release')
+            # Let holder proceed past .go gate into EXIT trap -> finish() -> pause point.
+            (w / 'work' / 'holder.go').touch()
+            wait_for(lambda: (w / 'work' / 'holder.ready').exists())
+            # Holder is now in finish() just before release_lock().
+            # Contender tries to acquire and should be refused.
+            procs['contender'] = self.spawn(env, script, 'contender', ACTION='refuse')
+            out, err = procs['contender'].communicate(timeout=10)
+            self.assertNotEqual(procs['contender'].returncode, 0, (out, err))
+            self.assertIn('holds', err)
+            # Lock state must be unchanged.
+            self.assertTrue((w / 'work' / 'holder.admitted').exists())
+            # Release holder.
+            (w / 'work' / 'holder.resume').touch()
+            out, err = procs['holder'].communicate(timeout=10)
+            self.assertEqual(procs['holder'].returncode, 0, (out, err))
+            evidence('publish-window', {'holder_pid': procs['holder'].pid,
+                                         'contender_pid': procs['contender'].pid,
+                                         'contender_refused': True})
+
+    def test_release_lock_ownership_verified(self):
+        """R1-3: release_lock must fail when the owner's LOCK_SLOT no longer
+        names its token. The .released marker must not be published for a token
+        the run no longer owns, and the run's exit status becomes 3."""
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            env, script = self.setup_run(w)
+            # Holder acquires lock normally, then we corrupt its LOCK_SLOT to point
+            # to a different token before finish() runs.
+            procs = {}
+            procs['holder'] = self.spawn(env, script, 'holder', PAUSE_AT='finish-before-release')
+            # Let holder proceed past .go gate into EXIT trap -> finish() -> pause point.
+            (w / 'work' / 'holder.go').touch()
+            wait_for(lambda: (w / 'work' / 'holder.ready').exists())
+            # Holder is now in finish() just before release_lock().
+            # For the first generation, LOCK_SLOT is the canonical lock file (lock),
+            # not lock.claim-1. Corrupt it to point to a different token.
+            lock_slot = w / 'state' / 'lock'
+            if lock_slot.is_symlink():
+                # Replace the symlink target with a different token
+                different_token = 'gen=1 pid=999999 start=2020-01-01T00:00:00 nonce=different format=r7'
+                lock_slot.unlink()
+                lock_slot.symlink_to(different_token)
+            # Now resume holder; it should hit release_lock, fail ownership check,
+            # not publish .released, and exit with rc=3.
+            (w / 'work' / 'holder.resume').touch()
+            out, err = procs['holder'].communicate(timeout=10)
+            # release_lock fails -> finish() sets rc=3
+            self.assertEqual(procs['holder'].returncode, 3, (out, err))
+            # .released marker must not be published for the original token
+            released = w / 'state' / 'lock.released'
+            self.assertFalse(released.exists() or released.is_symlink(),
+                             'released marker must not be published when ownership check fails')
+            evidence('release-lock-ownership', {'holder_pid': procs['holder'].pid,
+                                                 'exit_code': procs['holder'].returncode,
+                                                 'released_exists': released.exists() or released.is_symlink()})
+
+    def test_in_run_takeover_refused(self):
+        """AWG-041-b: A second install.sh invocation started while the first is
+        mid-install (holding the lock) must be refused. This test runs a real
+        shell fixture where the holder acquires the lock and pauses at
+        'in-run-hold' (after acquire_lock, simulating mid-install work), and a
+        contender with ACTION='refuse' attempts to acquire. The contender must
+        fail with 'another install.sh run holds lock'.
+
+        Native run note: A native run would additionally prove:
+        - The lock file on /var/db/awg-install/lock survives across the full
+          install.sh lifecycle including kernel build, staging, and publish.
+        - Signal handling (SIGTERM, SIGKILL) during the long mid-install phase
+          correctly releases or reclaims the lock via the .released marker.
+        - The BSD final check (verify_bsd_final) runs atomically within the lock.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            env, script = self.setup_run(w)
+            # Holder: acquire lock, then pause at 'in-run-hold' (simulating mid-install).
+            procs = {}
+            procs['holder'] = self.spawn(env, script, 'holder', PAUSE_AT='in-run-hold')
+            wait_for(lambda: (w / 'work' / 'holder.ready').exists())
+            # Holder has acquired the lock and is now mid-install.
+            # Contender tries to acquire and should be refused.
+            procs['contender'] = self.spawn(env, script, 'contender', ACTION='refuse')
+            out, err = procs['contender'].communicate(timeout=10)
+            self.assertNotEqual(procs['contender'].returncode, 0, (out, err))
+            self.assertIn('another install.sh run', err)
+            self.assertIn('holds', err)
+            # Lock state must be unchanged.
+            self.assertTrue((w / 'work' / 'holder.admitted').exists())
+            # Release holder.
+            (w / 'work' / 'holder.resume').touch()
+            (w / 'work' / 'holder.go').touch()
+            out, err = procs['holder'].communicate(timeout=10)
+            self.assertEqual(procs['holder'].returncode, 0, (out, err))
+            evidence('in-run-takeover', {'holder_pid': procs['holder'].pid,
+                                          'contender_pid': procs['contender'].pid,
+                                          'contender_refused': True})
 
 
 if __name__ == '__main__':

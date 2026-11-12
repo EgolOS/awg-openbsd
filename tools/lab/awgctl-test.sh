@@ -136,10 +136,10 @@ if [ -n "$A" ] && [ "$A" = "$B" ]; then
 	pass "awgctl show matches ifconfig on all compared fields"
 else
 	fail "awgctl show differs from ifconfig"
-	echo "$A" > /tmp/awgctl-ifc.$$
-	echo "$B" > /tmp/awgctl-show.$$
-	diff -u /tmp/awgctl-ifc.$$ /tmp/awgctl-show.$$
-	rm -f /tmp/awgctl-ifc.$$ /tmp/awgctl-show.$$
+	echo "$A" > "${TMPDIR:-/tmp}/awgctl-ifc.$$"
+	echo "$B" > "${TMPDIR:-/tmp}/awgctl-show.$$"
+	diff -u "${TMPDIR:-/tmp}/awgctl-ifc.$$" "${TMPDIR:-/tmp}/awgctl-show.$$"
+	rm -f "${TMPDIR:-/tmp}/awgctl-ifc.$$" "${TMPDIR:-/tmp}/awgctl-show.$$"
 fi
 
 echo
@@ -324,10 +324,10 @@ if [ -n "$A" ] && [ "$A" = "$B" ]; then
 	pass "3.1 show matches ifconfig"
 else
 	fail "3.1 show differs from ifconfig"
-	echo "$A" > /tmp/awgctl-ifc.$$
-	echo "$B" > /tmp/awgctl-show.$$
-	diff -u /tmp/awgctl-ifc.$$ /tmp/awgctl-show.$$
-	rm -f /tmp/awgctl-ifc.$$ /tmp/awgctl-show.$$
+	echo "$A" > "${TMPDIR:-/tmp}/awgctl-ifc.$$"
+	echo "$B" > "${TMPDIR:-/tmp}/awgctl-show.$$"
+	diff -u "${TMPDIR:-/tmp}/awgctl-ifc.$$" "${TMPDIR:-/tmp}/awgctl-show.$$"
+	rm -f "${TMPDIR:-/tmp}/awgctl-ifc.$$" "${TMPDIR:-/tmp}/awgctl-show.$$"
 fi
 # Legacy show (case 1 snapshot) must not invent the 3.1-only keys.
 if echo "$SH" | flat | grep -qE '^(awgs3|awgs4|awgi[1-5]|awghpk|awgcpa)'; then
@@ -586,16 +586,16 @@ fi
 
 echo
 echo "== 15. R4-10: literal secrets warn, buffers are wiped"
-"$AWGCTL" set "$IFACE2" PrivateKey "$KEY0_PRIV" 2>/tmp/awgctl-lit.$$
+"$AWGCTL" set "$IFACE2" PrivateKey "$KEY0_PRIV" 2>"${TMPDIR:-/tmp}/awgctl-lit.$$"
 rc=$?
 [ "$rc" = 0 ] && pass "15: literal key argument still accepted" || \
 	fail "15: literal key argument exits $rc"
-if grep -qi "process listing" /tmp/awgctl-lit.$$; then
+if grep -qi "process listing" "${TMPDIR:-/tmp}/awgctl-lit.$$"; then
 	pass "15: literal secret warns to prefer stdin"
 else
 	fail "15: literal secret accepted silently"
 fi
-rm -f /tmp/awgctl-lit.$$
+rm -f "${TMPDIR:-/tmp}/awgctl-lit.$$"
 P15=$("$AWGCTL" show "$IFACE2" 2>/dev/null)
 if has_field "$P15" "awgpubkey $KEY0_PUB"; then
 	pass "15: literal key is the key the kernel installed"

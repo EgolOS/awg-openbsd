@@ -27,6 +27,20 @@ fi
 printf '#!/bin/sh\n' > obj/ifconfig
 /bin/chmod 755 obj/ifconfig
 printf 'kernel\n' > obj/bsd
+# A real kernel build also leaves the compile Makefile and the relink inputs
+# next to the objects; the installer publishes them for KARL (F9).
+cat > obj/Makefile <<'MK'
+newbsd:
+	@echo newbsd
+reconfig:
+	@echo reconfig
+newinstall:
+	@echo newinstall
+MK
+printf '#!/bin/sh\n' > obj/makegap.sh
+printf 'SECTIONS { }\n' > obj/ld.script
+printf 'obj\n' > obj/if_awg.o
+printf 'obj\n' > obj/vers.o
 # The awgctl build (make -C sbin/awgctl) leaves its binary in the source
 # directory, so produce that too.
 printf '#!/bin/sh\n' > awgctl

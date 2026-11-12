@@ -69,7 +69,7 @@ def comparison(lines, case, failed):
 
 def runs(clean, injected, key, value, blind=False):
     cl, il = Path(clean).read_text().splitlines(), Path(injected).read_text().splitlines()
-    for lines, passes, fails in ((cl, 74, 0), (il, 72, 2)):
+    for lines, passes, fails in ((cl, 81, 0), (il, 79, 2)):
         require(sum(x.startswith("PASS:") for x in lines) == passes and
                 sum(x.startswith("FAIL:") for x in lines) == fails, "unexpected fixture counts")
         one(lines, "BUILD: awgctl-fixture OK")
@@ -86,13 +86,13 @@ def runs(clean, injected, key, value, blind=False):
         changed = difference(a, b)
         require(changed == {key}, f"{case} wrong cause: {','.join(sorted(changed)) or 'none'}; expected {key}")
         require(b[key] == value, f"{case} wrong injected post value")
-    print(f"records: built; clean 74/0; injected 72/2; cause: {key}")
+    print(f"records: built; clean 81/0; injected 79/2; cause: {key}")
 
 
 def loss(log, mtu_only=False):
     lines = Path(log).read_text().splitlines()
     one(lines, "BUILD: awgctl-fixture OK")
-    require(sum(x.startswith("PASS:") for x in lines) == 73, "loss control must have 73 PASS")
+    require(sum(x.startswith("PASS:") for x in lines) == 80, "loss control must have 80 PASS")
     require([x.split(":", 2)[1].strip() for x in lines if x.startswith("FAIL:")] == ["F13c"], "address loss must fail F13c only")
     a, b = comparison(lines, "F13c", True)
     if mtu_only:
@@ -113,11 +113,11 @@ def counters(receipt, log):
     require(all(int(after[k]) == int(before[k]) + 1 for k in ("tx", "rx", "handshake")), "counters did not advance")
     lines = Path(log).read_text().splitlines()
     one(lines, "BUILD: awgctl-fixture OK")
-    require(sum(x.startswith("PASS:") for x in lines) == 74 and not any(x.startswith("FAIL:") for x in lines), "counter control not green")
+    require(sum(x.startswith("PASS:") for x in lines) == 81 and not any(x.startswith("FAIL:") for x in lines), "counter control not green")
     for case in ("F13a", "F13c"):
         a, b = comparison(lines, case, False)
         require(not difference(a, b), "counter control changed a comparison")
-    print("records: real tx/rx/handshake advanced; projected comparisons unchanged; 74/0")
+    print("records: real tx/rx/handshake advanced; projected comparisons unchanged; 81/0")
 
 
 def main():

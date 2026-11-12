@@ -10,8 +10,8 @@
  * (awg_ioctl_get copies ubuf[i], lines 3676-3684) and reports the live peer
  * counters and last-handshake (lines 3606-3612); SIOCSAWG stores the fields
  * named by i_flags. State lives in $AWGFIX_STATE (default
- * /tmp/awgctl-fixture.state) so consecutive awgctl invocations see the same
- * interface, exactly like a kernel would.
+ * $TMPDIR/awgctl-fixture.state, falling back to /tmp) so consecutive
+ * awgctl invocations see the same interface, exactly like a kernel would.
  *
  * Fixture knobs (environment):
  *   AWGFIX_STATE    state file (key=value)
@@ -33,6 +33,7 @@ struct if_data {
 #include <net/if_awg.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <ifaddrs.h>
 #include <errno.h>
 #include <limits.h>
@@ -41,6 +42,8 @@ struct if_data {
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#define FIX_AIP_MAX	4	/* allowed-IP entries a peer can carry */
 
 struct fix_state {
 	unsigned int	 flags;
@@ -60,7 +63,190 @@ struct fix_state {
 	char		addrs[512];	/* canonical "fam:addr/prefix" list, R9/R4-08 */
 	int		 has_addrs;	/* the addrs key is present */
 	int		 up;		/* AF_LINK IFF_UP, R9/R4-08 */
+	/* E2: obfuscation parameters and peer sub-objects the get reply
+	 * carries, so the status path can be compared against what this
+	 * fixture — standing in for the kernel — actually filled in. */
+	int		 psk;
+	int		 pka;
+	int		 endpoint;
+	int		 hpk;
+	int		 trailers;
+	int		 cookies;
+	int		 random_trailers;
+	int		 disable_cookies;
+	int		 jc, jmin, jmax;
+	int		 s[4];
+	unsigned int	 h[4][2];	/* H1-H4, lo/hi */
+	unsigned int	 range[6][2];	/* timing keys, then CPA */
+	int		 aip_count;
+	char		 aip[FIX_AIP_MAX][INET6_ADDRSTRLEN + 8];
+	/*
+	 * E2: the peer description the kernel carries in p_description.
+	 * The state file is line-oriented, so the value is written with
+	 * C-style escapes (backslash-n, backslash-t, backslash-r,
+	 * backslash-b, backslash-f, backslash-backslash, backslash-quote,
+	 * backslash-xNN) and decoded by fix_unescape() below. That lets a
+	 * test put a control character or a quote in front of the JSON
+	 * emitter, which is where an escape bug would break a script.
+	 */
+	char		 pdescr[IFDESCRSIZE];
 };
+
+/*
+ * E2: a range key is "lo-hi" (or just "lo" when both bounds agree);
+ * the pair lands in one {lo, hi} slot of the fixture state.
+ */
+static void
+fix_range(const char *val, unsigned int *out)
+{
+	const char *dash = strchr(val, '-');
+
+	if (dash == NULL) {
+		out[0] = (unsigned int)strtoul(val, NULL, 0);
+		out[1] = out[0];
+		return;
+	}
+	out[0] = (unsigned int)strtoul(val, NULL, 0);
+	out[1] = (unsigned int)strtoul(dash + 1, NULL, 0);
+}
+
+/* E2: copy a fixture {lo, hi} pair into a kernel range. */
+static void
+fix_copy_range(struct awg_range *r, const unsigned int *pair)
+{
+	r->r_lo = pair[0];
+	r->r_hi = pair[1];
+}
+
+/*
+ * E2: decode the C-style escapes fix_state.pdescr is written with, so a
+ * line-oriented state file can still carry a newline, a tab, a quote or a
+ * raw control byte into the kernel reply. Unknown escapes keep the
+ * backslash and the byte, so nothing is silently dropped.
+ */
+static void
+fix_unescape(char *dst, size_t n, const char *src)
+{
+	size_t o = 0;
+
+	while (*src != 0 && o + 1 < n) {
+		if (*src != '\\') {
+			dst[o++] = *src++;
+			continue;
+		}
+		src++;
+		switch (*src) {
+		case 'n': dst[o++] = '\n'; src++; break;
+		case 't': dst[o++] = '	'; src++; break;
+		case 'r': dst[o++] = '\r'; src++; break;
+		case 'b': dst[o++] = '\b'; src++; break;
+		case 'f': dst[o++] = '\f'; src++; break;
+		case '\\': dst[o++] = '\\'; src++; break;
+		case '"': dst[o++] = '"'; src++; break;
+		case 'x': {
+			unsigned int v = 0;
+			int digits = 0;
+
+			src++;
+			while (digits < 2 && isxdigit((unsigned char)*src)) {
+				v = v * 16 + (unsigned int)
+				    (isdigit((unsigned char)*src) ?
+				    *src - '0' :
+				    (tolower((unsigned char)*src) - 'a' + 10));
+				src++;
+				digits++;
+			}
+			if (digits > 0)
+				dst[o++] = (char)v;
+			else {
+				dst[o++] = '\\';
+				if (o + 1 < n)
+					dst[o++] = 'x';
+			}
+			break;
+		}
+		case 0:
+			dst[o++] = '\\';
+			break;
+		default:
+			dst[o++] = '\\';
+			if (o + 1 < n)
+				dst[o++] = *src++;
+			break;
+		}
+	}
+	dst[o] = 0;
+}
+
+/*
+ * E2: encode a peer description back into the state file's escaped form, so
+ * fix_unescape() round-trips it. state_write() rewrites the whole file on
+ * every GET that advances the counters, and a description must survive that.
+ */
+static void
+fix_escape(char *dst, size_t n, const char *src)
+{
+	static const char hex[] = "0123456789abcdef";
+	size_t o = 0;
+
+	for (; *src != 0; src++) {
+		unsigned char c = (unsigned char)*src;
+		const char *esc = NULL;
+		char tmp[5];
+
+		switch (c) {
+		case '\n': esc = "\\n"; break;
+		case '\t': esc = "\\t"; break;
+		case '\r': esc = "\\r"; break;
+		case '\b': esc = "\\b"; break;
+		case '\f': esc = "\\f"; break;
+		case '\\': esc = "\\\\"; break;
+		case '"': esc = "\\\""; break;
+		default: break;
+		}
+		if (esc == NULL && (c < 0x20 || c == 0x7f)) {
+			tmp[0] = '\\';
+			tmp[1] = 'x';
+			tmp[2] = hex[c >> 4];
+			tmp[3] = hex[c & 0xf];
+			tmp[4] = 0;
+			esc = tmp;
+		}
+		if (esc != NULL) {
+			if (o + strlen(esc) + 1 >= n)
+				break;
+			memcpy(dst + o, esc, strlen(esc));
+			o += strlen(esc);
+		} else {
+			if (o + 2 >= n)
+				break;
+			dst[o++] = (char)c;
+		}
+	}
+	dst[o] = 0;
+}
+
+/* E2: decode one allowed-IP token, "addr/prefix", into the reply. */
+static void
+fix_aip(struct awg_aip_io *ap, const char *token)
+{
+	char buf[INET6_ADDRSTRLEN + 8];
+	char *slash;
+
+	memset(ap, 0, sizeof(*ap));
+	snprintf(buf, sizeof(buf), "%s", token);
+	if ((slash = strchr(buf, '/')) != NULL) {
+		*slash++ = 0;
+		ap->a_cidr = atoi(slash);
+	}
+	if (strchr(buf, ':') != NULL) {
+		ap->a_af = AF_INET6;
+		inet_pton(AF_INET6, buf, &ap->a_addr.addr_ipv6);
+	} else {
+		ap->a_af = AF_INET;
+		inet_pton(AF_INET, buf, &ap->a_addr.addr_ipv4);
+	}
+}
 
 static void
 fix_log(const char *fmt, ...)
@@ -80,6 +266,20 @@ fix_log(const char *fmt, ...)
 	fclose(f);
 }
 
+static const char *
+state_path(void)
+{
+	static char buf[PATH_MAX];
+	const char *s = getenv("AWGFIX_STATE");
+	const char *t = getenv("TMPDIR");
+
+	if (s != NULL && *s != '\0')
+		return s;
+	snprintf(buf, sizeof(buf), "%s/awgctl-fixture.state",
+	    (t != NULL && *t != '\0') ? t : "/tmp");
+	return buf;
+}
+
 static void
 state_read(struct fix_state *st)
 {
@@ -87,9 +287,7 @@ state_read(struct fix_state *st)
 	FILE *f;
 	char line[AWG_ISPEC_MAXLEN + 64];
 
-	snprintf(path, sizeof(path), "%s",
-	    getenv("AWGFIX_STATE") ? getenv("AWGFIX_STATE") :
-	    "/tmp/awgctl-fixture.state");
+	snprintf(path, sizeof(path), "%s", state_path());
 	memset(st, 0, sizeof(*st));
 	st->prefix = 128;
 	st->family = AF_INET6;
@@ -163,6 +361,51 @@ state_read(struct fix_state *st)
 		}
 		else if (strcmp(key, "up") == 0)
 			st->up = atoi(val);
+		else if (strcmp(key, "psk") == 0)
+			st->psk = atoi(val);
+		else if (strcmp(key, "pka") == 0)
+			st->pka = atoi(val);
+		else if (strcmp(key, "pdescr") == 0)
+			fix_unescape(st->pdescr, sizeof(st->pdescr), val);
+		else if (strcmp(key, "endpoint") == 0)
+			st->endpoint = atoi(val);
+		else if (strcmp(key, "hpk") == 0)
+			st->hpk = atoi(val);
+		else if (strcmp(key, "trailers") == 0)
+			st->trailers = atoi(val);
+		else if (strcmp(key, "cookies") == 0)
+			st->cookies = atoi(val);
+		else if (strcmp(key, "random_trailers") == 0)
+			st->random_trailers = atoi(val);
+		else if (strcmp(key, "disable_cookies") == 0)
+			st->disable_cookies = atoi(val);
+		else if (strcmp(key, "jc") == 0)
+			st->jc = atoi(val);
+		else if (strcmp(key, "jmin") == 0)
+			st->jmin = atoi(val);
+		else if (strcmp(key, "jmax") == 0)
+			st->jmax = atoi(val);
+		else if (strcmp(key, "s1") == 0)
+			st->s[0] = atoi(val);
+		else if (strcmp(key, "s2") == 0)
+			st->s[1] = atoi(val);
+		else if (strcmp(key, "s3") == 0)
+			st->s[2] = atoi(val);
+		else if (strcmp(key, "s4") == 0)
+			st->s[3] = atoi(val);
+		else if (strncmp(key, "h", 1) == 0 && key[1] >= '1' &&
+		    key[1] <= '4' && key[2] == 0)
+			fix_range(val, &st->h[key[1] - '1'][0]);
+		else if (strncmp(key, "range", 5) == 0 && key[5] >= '1' &&
+		    key[5] <= '6' && key[6] == 0)
+			fix_range(val, &st->range[key[5] - '1'][0]);
+		else if (strncmp(key, "aip", 3) == 0 && key[3] >= '1' &&
+		    key[3] <= '0' + FIX_AIP_MAX && key[4] == 0) {
+			snprintf(st->aip[key[3] - '1'],
+			    sizeof(st->aip[0]), "%s", val);
+			if (st->aip_count < key[3] - '0')
+				st->aip_count = key[3] - '0';
+		}
 		else if (strncmp(key, "ispec", 5) == 0) {
 			int idx = atoi(key + 5) - 1;
 			if (idx >= 0 && idx < AWG_ISPEC_COUNT)
@@ -179,9 +422,7 @@ state_write(const struct fix_state *st)
 	char path[PATH_MAX], tmp[PATH_MAX + 8];
 	FILE *f;
 
-	snprintf(path, sizeof(path), "%s",
-	    getenv("AWGFIX_STATE") ? getenv("AWGFIX_STATE") :
-	    "/tmp/awgctl-fixture.state");
+	snprintf(path, sizeof(path), "%s", state_path());
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	if ((f = fopen(tmp, "w")) == NULL)
 		return;
@@ -201,6 +442,12 @@ state_write(const struct fix_state *st)
 	else if (st->has_aliases)
 		fprintf(f, "addrs=%s\n", st->aliases);
 	fprintf(f, "up=%d\n", st->up);
+	if (st->pdescr[0] != '\0') {
+		char esc[IFDESCRSIZE * 4];
+
+		fix_escape(esc, sizeof(esc), st->pdescr);
+		fprintf(f, "pdescr=%s\n", esc);
+	}
 	for (int i = 0; i < AWG_ISPEC_COUNT; i++)
 		if (st->ispec[i][0] != '\0')
 			fprintf(f, "ispec%d=%s\n", i + 1, st->ispec[i]);
@@ -227,6 +474,24 @@ ioctl(int fd, unsigned long request, ...)
 	va_end(ap);
 	if (arg == NULL)
 		return (-1);
+	/* Threshold control for awgctl's G6 probe-loop cap: report a size that
+	 * keeps growing by AWGFIX_GET_GROW bytes, for at most
+	 * AWGFIX_GET_GROW_STOP calls (unset/negative = never stop). The
+	 * caller's iteration cap is what has to stop it. */
+	if (request == SIOCGAWG && getenv("AWGFIX_GET_GROW") != NULL) {
+		static int grown;
+		struct awg_data_io *gd = arg;
+		const char *stop = getenv("AWGFIX_GET_GROW_STOP");
+		int limit = stop != NULL ? atoi(stop) : -1;
+
+		if (limit < 0 || grown < limit) {
+			gd->awgd_size += (size_t)strtoul(
+			    getenv("AWGFIX_GET_GROW"), NULL, 0);
+			grown++;
+			fix_log("GET grow %d size=%zu", grown, gd->awgd_size);
+			return (0);
+		}
+	}
 	if (getenv("AWGFIX_ENOTTY") != NULL && request == SIOCGAWG) {
 		errno = ENOTTY;
 		fix_log("GET enotty");
@@ -317,6 +582,9 @@ ioctl(int fd, unsigned long request, ...)
 		}
 		if (d->awgd_size < size) {
 			d->awgd_size = size;
+			/* Logged like every other GET: the probe-loop tests count
+			 * the requests the caller actually issued. */
+			fix_log("GET size %zu", d->awgd_size);
 			return (0);
 		}
 		/* Kernel-side copy of the interface, then the peer array. */
@@ -326,22 +594,84 @@ ioctl(int fd, unsigned long request, ...)
 		ip->i_version = st.version;
 		memset(ip->i_private, 0x11, AWG_KEY_LEN);
 		memset(ip->i_hpk, 0x22, AWG_HPK_LEN);
+		ip->i_jc = (uint16_t)st.jc;
+		ip->i_jmin = (uint16_t)st.jmin;
+		ip->i_jmax = (uint16_t)st.jmax;
+		ip->i_s1 = (uint16_t)st.s[0];
+		ip->i_s2 = (uint16_t)st.s[1];
+		ip->i_s3 = (uint16_t)st.s[2];
+		ip->i_s4 = (uint16_t)st.s[3];
+		fix_copy_range(&ip->i_h1, &st.h[0][0]);
+		fix_copy_range(&ip->i_h2, &st.h[1][0]);
+		fix_copy_range(&ip->i_h3, &st.h[2][0]);
+		fix_copy_range(&ip->i_h4, &st.h[3][0]);
+		fix_copy_range(&ip->i_cpa, &st.range[5][0]);
+		fix_copy_range(&ip->i_rekey_after_time, &st.range[0][0]);
+		fix_copy_range(&ip->i_rekey_timeout, &st.range[1][0]);
+		fix_copy_range(&ip->i_reject_after_time, &st.range[2][0]);
+		fix_copy_range(&ip->i_keepalive_timeout, &st.range[3][0]);
+		fix_copy_range(&ip->i_max_handshake_attempts,
+		    &st.range[4][0]);
+		ip->i_random_trailers = (uint8_t)st.random_trailers;
+		ip->i_disable_cookies = (uint8_t)st.disable_cookies;
 		ip->i_peers_count = st.peers;
-		size += (size_t)st.peers * sizeof(struct awg_peer_io);
+		size += (size_t)st.peers *
+		    (sizeof(struct awg_peer_io) + (size_t)st.aip_count *
+		    sizeof(struct awg_aip_io));
 		if (d->awgd_size < size) {
 			d->awgd_size = size;
+			fix_log("GET size %zu", d->awgd_size);
 			return (0);
 		}
-		if (st.peers > 0) {
+		/*
+		 * E2: every peer, laid out the way awg_ioctl_get lays them out
+		 * (the allowed-IP array rides inline after each peer), each with
+		 * its own counters and handshake so a per-peer record can be
+		 * told apart from its neighbour. Peer 0 keeps the older values
+		 * exactly, so the existing suites see the same interface.
+		 */
+		{
 			struct awg_peer_io *pp =
 			    (struct awg_peer_io *)&ip->i_peers[0];
-			memset(pp, 0, sizeof(*pp));
-			pp->p_flags = AWG_PEER_HAS_PUBLIC;
-			pp->p_txbytes = st.tx;
-			pp->p_rxbytes = st.rx;
-			pp->p_last_handshake.tv_sec =
-			    (time_t)(1700000000 + st.handshake);
-			pp->p_aips_count = 0;
+
+			for (int p = 0; p < st.peers; p++) {
+				struct awg_aip_io *ap;
+
+				memset(pp, 0, sizeof(*pp));
+				pp->p_flags = AWG_PEER_HAS_PUBLIC;
+				pp->p_public[0] = (uint8_t)p;
+				/* E2: the description the kernel holds for this
+				 * peer; empty is a value the kernel does hold. */
+				snprintf(pp->p_description,
+				    sizeof(pp->p_description), "%s",
+				    st.pdescr);
+				pp->p_txbytes = st.tx * (unsigned long long)(p + 1);
+				pp->p_rxbytes = st.rx * (unsigned long long)(p + 1);
+				if (st.handshake > 0)
+					pp->p_last_handshake.tv_sec =
+					    (time_t)(1700000000 + st.handshake + p);
+				if (st.psk)
+					pp->p_flags |= AWG_PEER_HAS_PSK;
+				if (st.pka) {
+					pp->p_flags |= AWG_PEER_HAS_PKA;
+					pp->p_pka = (uint16_t)(100 + p);
+					pp->p_pka_hi = (uint16_t)(100 + p);
+				}
+				if (st.endpoint) {
+					pp->p_flags |= AWG_PEER_HAS_ENDPOINT;
+					pp->p_endpoint.sa_sin.sin_family = AF_INET;
+					pp->p_endpoint.sa_sin.sin_addr.s_addr =
+					    htonl(0xC0000201U + (uint32_t)p);
+					pp->p_endpoint.sa_sin.sin_port =
+					    htons((uint16_t)(51820 + p));
+				}
+				pp->p_aips_count = (size_t)st.aip_count;
+				ap = &pp->p_aips[0];
+				for (int a = 0; a < st.aip_count; a++) {
+					fix_aip(&ap[a], st.aip[a]);
+				}
+				pp = (struct awg_peer_io *)(ap + st.aip_count);
+			}
 		}
 		/* Echo the caller's ispec pointers and fill their buffers,
 		 * as awg_ioctl_get does with ubuf/ulen. */
@@ -473,6 +803,12 @@ getifaddrs(struct ifaddrs **ifap)
 	fix_addr[n].ss_family = AF_LINK;
 	fix_ifa[n].ifa_flags = st.up ? IFF_UP : 0;	/* R9 */
 	fix_ifa[n].ifa_data = &fix_linkdata;
+	/* E2: a kernel that serves no if_data for the link entry — the status
+	 * path must then report no MTU rather than invent one. Interface state
+	 * is unaffected: it is read from ifa_flags, not if_data (pinned by
+	 * test_state_still_reported_without_if_data). */
+	if (getenv("AWGFIX_NODATA") != NULL)
+		fix_ifa[n].ifa_data = NULL;
 	n++;
 
 	/* Primary address, then each alias ("fam:addr/prefix" tokens).

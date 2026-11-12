@@ -88,35 +88,35 @@ class QuickR8Prevalidation(unittest.TestCase):
             return (r, ifstate.read_bytes(), routes.read_bytes())
 
     CASES = {
-        'Address octet': ('[Interface]\nPrivateKey = dummy\n'
+        'Address octet': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                           'Address = 10.0.0.1/24, 10.0.0.999/24\n'
                           '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                           'AllowedIPs = 0.0.0.0/0\n', 'Address'),
-        'Address v4 prefix': ('[Interface]\nPrivateKey = dummy\n'
+        'Address v4 prefix': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                               'Address = 10.0.0.1/33\n'
                               '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                               'AllowedIPs = 0.0.0.0/0\n', 'Address'),
-        'AllowedIPs prefix': ('[Interface]\nPrivateKey = dummy\n'
+        'AllowedIPs prefix': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                               'Address = 10.0.0.1/24\n'
                               '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                               'AllowedIPs = 10.0.0.0/33\n', 'AllowedIPs'),
-        'Endpoint port': ('[Interface]\nPrivateKey = dummy\n'
+        'Endpoint port': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                           'Address = 10.0.0.1/24\n'
                           '[Peer]\nPublicKey = pub\nEndpoint = example.com:70000\n'
                           'AllowedIPs = 0.0.0.0/0\n', 'endpoint'),
-        'MTU range': ('[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+        'MTU range': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                       'MTU = 100\n'
                       '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                       'AllowedIPs = 0.0.0.0/0\n', 'MTU'),
-        'DNS octet': ('[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+        'DNS octet': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                       'DNS = 1.2.3.999\n'
                       '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                       'AllowedIPs = 0.0.0.0/0\n', 'DNS'),
-        'NUL bytes': ('[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+        'NUL bytes': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                       'MTU = 1420\x009\n'
                       '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                       'AllowedIPs = 0.0.0.0/0\n', 'NUL'),
-        'Truncated last line': ('[Interface]\nPrivateKey = dummy\n'
+        'Truncated last line': ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                                 'Address = 10.0.0.1/24\n'
                                 '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
                                 'AllowedIPs = 0.0.0.0/0', 'truncated'),

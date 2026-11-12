@@ -371,7 +371,7 @@ CONTROL_COUNTER_RECEIPT="$WORK/counters.json" AWGCTL_GATE_IFCONFIG="$WORK/wrong-
     AWGFIX_ROUTES="$WORK/c21.routes" sh "$here/awgctl-fixture-test.sh" > "$WORK/c21.log" 2>&1
 c21_rc=$?
 if [ "$c21_rc" = 0 ] && "$PYTHON" "$here/gate-records.py" counters "$WORK/counters.json" "$WORK/c21.log"; then
-	echo 'PASS: C21 (actual counter-only mutation; suite 74 PASS / 0 FAIL)'
+	echo "PASS: C21 (actual counter-only mutation; suite $(grep -c '^PASS:' "$WORK/c21.log") PASS / 0 FAIL)"
 else
 	echo 'FAIL: C21 (counter-only mutation was rejected or did not execute)'
 	FAILED=$((FAILED + 1))

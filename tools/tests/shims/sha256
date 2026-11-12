@@ -21,7 +21,9 @@ if table and os.path.isfile(table):
 if digest is None:
     digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
 if a and a[0] == "-h" and len(a) >= 3:
+    # OpenBSD sha256(1): `sha256 -h hashfile file` appends
+    # "SHA256 (file) = digest" to the hash file.
     with open(a[1], "a") as f:
-        f.write("%s  %s\n" % (digest, path))
+        f.write("SHA256 (%s) = %s\n" % (path, digest))
 else:
     print(digest)

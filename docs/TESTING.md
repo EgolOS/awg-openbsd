@@ -23,20 +23,25 @@ client for interoperability.
 
 See `ENGINEERING-REPORT.md` and `evidence/2026-11-07/` for actual commands/results.
 `make check` also runs the compiled-C integration gate twice through
-`make check-cgate`: once clean (it must report 74 PASS / 0 FAIL) and once with
+`make check-cgate`: once clean (it must report 81 PASS / 0 FAIL) and once with
 I2 rewritten by the fixture (it must fail, naming the changed value). The
+number is enforced in one place — `tools/lab/gate-records.py` — and quoted
+here; the per-case totals moved from 74 to 81 when F14/F15 were added.
 mandatory campaign behind that is `python3 tools/lab/gate-controls.py` — one
 green case plus 26 negative cases, each required to return a nonzero
 `make check-cgate` for its own reason — and `tools/lab/oracle-controls.sh`
 (C1–C24) pins the canonical-comparison semantics. A gate that cannot fail is
 not a gate, so these controls are part of the release gate, not a side script.
+`make check` additionally gates the recorded upstream digest
+(`make check-upstream` against `tools/upstream/8.0.sha256`), so a vendored
+source drift is caught before release.
 
 `make check` now includes offline `tools/tests/` regressions (real signify fixtures,
 not a second parser). Native OpenBSD tests separately exercised ownership via
 actual doas, generator tracing/permissions/cleanup, all secret-key stdin ordering,
 stale ifconfig rejection and an unprivileged patched-ifconfig build.
 
-The optional `test_hp_vector.py` consumes a verified OpenBSD 8.0 `sys/` tree:
+The optional `tools/tests/test_hp_vector.py` (planned) consumes a verified OpenBSD 8.0 `sys/` tree:
 `OPENBSD_SYS_TREE=/verified/sys make check-tests`. It compiles the real
 `awg_hp_init` with the digest-pinned ChaCha header (only its kernel include is
 adapted) and compares the keystream with OpenSSL. This is a userspace KAT, not
@@ -139,9 +144,11 @@ ping -c 1 10.8.9.2      # pre-fix: kernel panics here
 |---|---|
 | `awg(4)` to `awg(4)`, two VMs, 3.1 | **verified here** — handshake, IPv4 ICMP, exact receiver bytes+SHA256; no HPK in this interop profile |
 | AmneziaWG for Android/Windows (legacy 2.0) | reported by the upstream fork, not re-run here |
-| `amneziawg-go` (3.1) | reported by the upstream fork, not re-run here |
+| `amneziawg-go` (3.1) | **narrow pass** — recorded in `docs/ENGINEERING-REPORT.md` §11.3 (legacy and 3.1 S3/S4+HPK, ICMP both ways, 8 MiB with matching sha256); not re-run at this pin |
 | Linux kernel module (3.1) | reported by the upstream fork; not re-run, and not with `HeaderProtectionKey` |
 
 The two-VM lab has no third machine, so the first row is the only client
-interoperability this repository can claim. Anything not in this table is
-untested — say so in the release notes.
+interoperability run for this candidate; the `amneziawg-go` row above is a
+historical narrow pass on record in `docs/ENGINEERING-REPORT.md` §11.3, not
+re-run at this pin. Anything not in this table is untested — say so in the
+release notes.

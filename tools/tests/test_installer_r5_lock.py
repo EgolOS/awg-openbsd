@@ -94,7 +94,7 @@ def extract(name):
 LOCK_HELPERS = ['new_lock_token', 'proc_start_time', 'lock_token_start',
                 'lock_token_gen', 'lock_owner_live', 'lock_mv_t', 'publish_lock_owner',
                 'read_lock_owner', 'lock_token_pid', 'lock_record_age',
-                'release_lock', 'verify_bsd_final', 'verify_lock_held']
+                'release_lock', 'manifest_get', 'kernel_db_sha', 'verify_bsd_final']
 
 
 def verify_held_sleep(secs):
@@ -102,7 +102,14 @@ def verify_held_sleep(secs):
     reclaim that lands during the work must be observed)."""
     return ('acquire_lock\n'
             'sleep ' + str(secs) + '\n'
-            'verify_lock_held\n')
+            'verify_held_inline() {\n'
+            '    [ "$LOCK_OWNED" = yes ] || { echo "lock not held" >&2; exit 1; }\n'
+            '    [ "$(read_lock_owner "$LOCK_SLOT")" = "$LOCK_TOKEN" ] \\\n'
+            '        && [ ! -e "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \\\n'
+            '        && [ ! -L "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \\\n'
+            '        || { echo "lock replaced by another run" >&2; exit 1; }\n'
+            '}\n'
+            'verify_held_inline\n')
 
 
 def functions(*names):

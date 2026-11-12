@@ -138,16 +138,10 @@ parse_options() {
 	CONFIG_FILE="$(readlink -f "$CONFIG_FILE")"
 	trusted_config_path "$CONFIG_FILE"
 
-	# R8/R4-08: a config with NUL bytes or a truncated last line is
-	# refused before any field is applied — the bytes behind a NUL and
-	# behind the cut must not reach the interface.
-	[[ $(tr -dc '\0' < "$CONFIG_FILE" | wc -c) -eq 0 ]] \
-		|| die "\`$CONFIG_FILE' contains NUL bytes"
-	[[ $(tail -c 1 "$CONFIG_FILE" | wc -l) -eq 1 ]] \
-		|| die "\`$CONFIG_FILE' has a truncated last line"
-
 	# The config holds the long-term private key and can carry PreUp/PostUp
-	# commands that run as root. Refuse one other users can read.
+	# commands that run as root. Refuse one other users can read. These two
+	# stats describe the path and its mode, not the body, so they run
+	# before the single body read below.
 	local mode
 	mode=$(stat -f %Lp "$CONFIG_FILE" 2>/dev/null) || die "cannot stat $CONFIG_FILE"
 	case "$mode" in
@@ -156,6 +150,35 @@ parse_options() {
 	esac
 	mode=$(stat -f %Lp "$(dirname "$CONFIG_FILE")" 2>/dev/null)
 	[[ $mode == 700 ]] || echo "[!] WARNING: $(dirname "$CONFIG_FILE") is mode $mode, expected 700" >&2
+
+	# G4: ONE byte-coherent read of the verified body. A bash string cannot
+	# hold NUL bytes (the shell drops them), so the snapshot is a private
+	# file — created with mktemp in the config's own root-only directory,
+	# mode 0600 — and the checks below read that file, never CONFIG_FILE
+	# again. cat's exit status is tested directly; the previous form
+	# appended a `printf x` sentinel inside the same command substitution,
+	# which made a failed read look successful.
+	AWG_QUICK_SNAPSHOT=$(mktemp "${CONFIG_FILE%/*}/.awg-quick.XXXXXXXX") \
+		|| die "cannot create a snapshot for $CONFIG_FILE"
+	# The snapshot carries the private key: wipe it on every exit path,
+	# including the die()s below. parse_options runs before cmd_up/cmd_down
+	# install their own traps, so this one is cleared at the end instead of
+	# being chained.
+	trap 'rm -f -- "${AWG_QUICK_SNAPSHOT:-}"' EXIT
+	if ! cat "$CONFIG_FILE" >"$AWG_QUICK_SNAPSHOT"; then
+		die "cannot read $CONFIG_FILE"
+	fi
+
+	# R8/R4-08: a config with NUL bytes or a truncated last line is
+	# refused before any field is applied — the bytes behind a NUL and
+	# behind the cut must not reach the interface. Both tests read the
+	# snapshot, i.e. the bytes the parse loop consumes.
+	[[ $(tr -dc '\0' <"$AWG_QUICK_SNAPSHOT" | wc -c) -eq 0 ]] \
+		|| die "\`$CONFIG_FILE' contains NUL bytes"
+	# An empty file counts as complete, as before; otherwise the snapshot
+	# must end in a newline.
+	[[ ! -s $AWG_QUICK_SNAPSHOT || $(tail -c 1 "$AWG_QUICK_SNAPSHOT" | wc -l) -eq 1 ]] \
+		|| die "\`$CONFIG_FILE' has a truncated last line"
 
 	flush_peer() {
 		[[ -n $cur_pubkey ]] || return 0
@@ -170,6 +193,9 @@ parse_options() {
 
 	shopt -s nocasematch
 	while IFS= read -r line || [[ -n $line ]]; do
+		# R8/R4-08: reject lines exceeding 4096 bytes before any processing
+		# This bounds the cost of subsequent parameter expansion and case matching
+		[[ ${#line} -le 4096 ]] || die "config line exceeds 4096 bytes"
 		stripped="${line%%\#*}"
 		key="${stripped%%=*}"; key="${key##*([[:space:]])}"; key="${key%%*([[:space:]])}"
 		value="${stripped#*=}"; value="${value##*([[:space:]])}"; value="${value%%*([[:space:]])}"
@@ -183,7 +209,13 @@ parse_options() {
 
 		if [[ $in_interface -eq 1 ]]; then
 			case "$key" in
-			PrivateKey)            PRIVATE_KEY="$value" ;;
+			# G5: validate the key's base64 shape at parse time,
+			# like awgctl's load_key, so a broken key fails before
+			# the interface is created.
+			PrivateKey)
+				[[ $value =~ ^[A-Za-z0-9+/]{43}=$ ]] \
+					|| die "PrivateKey is not a 44-character base64 key"
+				PRIVATE_KEY="$value" ;;
 			ListenPort)            LISTEN_PORT="$value" ;;
 			Address)               ADDRESSES+=( ${value//,/ } ) ;;
 			MTU)                   MTU="$value" ;;
@@ -236,9 +268,17 @@ parse_options() {
 				[[ $value == *-* ]] && AWG31_KEYS+=( "PersistentKeepalive range" ) ;;
 			esac
 		fi
-	done < "$CONFIG_FILE"
+	# G4: consume the single snapshot, not a fresh open of the file.
+	done < "$AWG_QUICK_SNAPSHOT"
 	flush_peer
 	shopt -u nocasematch
+
+	# The snapshot is fully consumed: drop the private-key copy now instead
+	# of leaving it on disk for the rest of the run. No earlier trap exists
+	# at this point in the script (cmd_up/cmd_down install theirs later).
+	rm -f -- "$AWG_QUICK_SNAPSHOT"
+	AWG_QUICK_SNAPSHOT=
+	trap - EXIT
 
 	[[ -n $PRIVATE_KEY ]] || die "PrivateKey not set in $CONFIG_FILE"
 
@@ -568,14 +608,16 @@ validate_cidr() {
 	*/*) addr="${cidr%/*}"; prefix="${cidr#*/}" ;;
 	esac
 	if [[ "$addr" == *:* ]]; then
-		is_ipv6 "${addr%%\%*}" \
+		is_ipv6 "${addr%%%*}" \
 			|| die "$label '$cidr' is not a valid IPv6 address"
-		[[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 128 ) ]] \
+		# Reject overlong prefix strings BEFORE arithmetic to prevent bash integer overflow
+		[[ -z "$prefix" || ( ${#prefix} -le 3 && "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 128 ) ]] \
 			|| die "$label '$cidr' has an invalid prefix (IPv6: 0..128)"
 	else
 		is_ipv4 "$addr" \
 			|| die "$label '$cidr' is not a valid IPv4 address"
-		[[ -z "$prefix" || ( "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 32 ) ]] \
+		# Reject overlong prefix strings BEFORE arithmetic to prevent bash integer overflow
+		[[ -z "$prefix" || ( ${#prefix} -le 2 && "$prefix" =~ ^[0-9]+$ && 10#$prefix -le 32 ) ]] \
 			|| die "$label '$cidr' has an invalid prefix (IPv4: 0..32)"
 	fi
 }
@@ -805,8 +847,11 @@ set_dns() {
 		echo "[+] resolvd is not running, DNS will not be configured" >&2
 		return 0
 	fi
+	# G1: the backup must hold the ORIGINAL resolv.conf; the search line
+	# is appended to the live file after the copy, so `down` restores the
+	# nameservers together with the search list.
 	cmd cp /etc/resolv.conf "/etc/resolv.conf.wg-quick-backup.$INTERFACE"
-	[[ ${#DNS_SEARCH[@]} -eq 0 ]] || cmd printf 'search %s\n' "${DNS_SEARCH[*]}" > /etc/resolv.conf
+	[[ ${#DNS_SEARCH[@]} -eq 0 ]] || cmd printf 'search %s\n' "${DNS_SEARCH[*]}" >> /etc/resolv.conf
 	cmd route nameserver "$REAL_INTERFACE" "${DNS[@]}"
 }
 

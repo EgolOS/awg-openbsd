@@ -21,8 +21,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def git_archive(dest: Path) -> None:
+    # AWG_SOURCE_REPO lets the suite run from inside a previous export
+    # (which has no .git) and still archive the real repository HEAD.
+    repo = Path(os.environ.get('AWG_SOURCE_REPO') or ROOT)
     with open(dest / 'head.tar', 'wb') as tar:
-        proc = subprocess.run(['git', 'archive', 'HEAD'], cwd=ROOT,
+        proc = subprocess.run(['git', 'archive', 'HEAD'], cwd=repo,
                               stdout=tar, stderr=subprocess.PIPE, text=True)
     assert proc.returncode == 0, proc.stderr
     proc = subprocess.run(['tar', '-x', '-C', str(dest), '-f', str(dest / 'head.tar')],

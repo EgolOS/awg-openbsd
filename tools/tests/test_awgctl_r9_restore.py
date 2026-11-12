@@ -66,7 +66,15 @@ PRE_STATE_DOWN = PRE_STATE.replace('up=1', 'up=0')
 @unittest.skipUnless(shutil.which(CC), 'no C compiler available')
 class RestoreByteIdentical(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # E2-HARNESS-PARALLEL R2: the fixture's trust walk (awgctl.c
+        # open_trusted) validates every path component, and a $TMPDIR under
+        # /tmp adds the 1777 `tmp` component, so the fixture exits before
+        # `up` runs. A repo-local mkdtemp — the pattern
+        # tools/lab/awgctl-fixture-test.sh already uses — keeps every
+        # component private (0700) and stays unique per run, so concurrent
+        # workers under two TMPDIRs never share a scratch root.
+        self.tmp = tempfile.TemporaryDirectory(prefix='.awgctl-r9.',
+                                               dir=str(ROOT))
         self.work = Path(self.tmp.name)
         self.conf = self.work / 'conf'
         self.conf.mkdir()

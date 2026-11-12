@@ -32,6 +32,7 @@ class InstallerR8Recovery(ShRunner, unittest.TestCase):
                      + extract('remove_pair_member') + '\n'
                      + extract('restore_generation_pair') + '\n'
                      + extract('record_installed_pair') + '\n'
+                     + tr.RELINK_BODY + '\n'
                      + extract('rollback_pair') + '\nrollback_pair\n')
 
     PUBLISH_BODY = (tr.InstallerLockAndPublish.PUBLISH_BODY

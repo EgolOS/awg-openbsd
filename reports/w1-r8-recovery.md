@@ -7,7 +7,7 @@ Tree: `awg-rc2/w1i`, branch `integ/installer-r6`, base `1bcff8d`. No push. VM 22
 
 | # | Item | Status | Command |
 |---|------|--------|---------|
-| 1 | Fail closed before any write (recorded member missing/corrupt → non-zero, nothing written, member named) | **PASS** | `python3 -m unittest discover -s tools/tests -p 'test_installer_r8_recovery.py' -v` |
+| 1 | Fail closed before any write (recorded member missing/corrupt → non-zero, nothing written, member named) | **PASS** | `python3 -m unittest discover -s tools/tests -p 'test_installer_r8_recovery.py' -v` (historical: from other branch) |
 | 2 | Restore every published member (kernel, ifconfig, if_awg.h, awgctl, /var/db/kernel.SHA256), hash-verified before "rolled back" | **PASS** | same suite (`test_rollback_restores_kernel_sha256_member`, `test_kernel_sha256_restored_after_publish_rollback`) |
 | 3 | Three outcomes in exit status + message: `rolled back` (20) / `rollback failed (state: …)` (21) / `nothing to roll back` (22) | **PASS** | same suite (`test_second_signal_during_recovery_reports_rolled_back`, `test_recovery_without_manifest_reports_nothing_to_roll_back`, r7_commit `test_record_failure_reports_failed_rollback`) |
 | 4 | Regression tests kept (header missing, awgctl missing, kernel.SHA256 restore, second signal) | **PASS** | `tools/tests/test_installer_r8_recovery.py` (6 tests) |
@@ -16,7 +16,7 @@ Tree: `awg-rc2/w1i`, branch `integ/installer-r6`, base `1bcff8d`. No push. VM 22
 
 ## Reproduction (before the fix, HEAD 1bcff8d)
 
-`python3 -m unittest discover -s tools/tests -p 'test_installer_r8_recovery.py' -v`
+`python3 -m unittest discover -s tools/tests -p 'test_installer_r8_recovery.py' -v` (historical: from other branch)
 → `FAILED (failures=3, errors=1)` (evidence: `awg-rc2/evidence/r8-repro-before.log`):
 
 - `test_restore_missing_header_backup_fails_closed` — FAIL: `AssertionError: 0 == 0` — the

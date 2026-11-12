@@ -1,7 +1,8 @@
 # W1-R6b — installer correctness: N1 lock, R4-02 recovery, R4-08 prevalidation
 
-Repo `awg-rc2/w1c`, branch `fix/installer-lock`, base `9ced40e`.
-Commits: `bf239b2` (N1), `b38224d` (R4-08), `f0e3298` + `ef0cf62` (staging test fixes).
+Repo `awg-rc2/w1c` (out-of-tree workspace, not retained), branch `fix/installer-lock`, base: the
+maintainer's WIP. Its commit identities resolve in no ref of this repository, so none is cited.
+Commits (out-of-tree workspace): N1, R4-08, staging test fixes — not cited here.
 No push. VM 2205 used for the OpenBSD verification run.
 
 ## N1 — exclusive run lock (FIXED)
@@ -77,7 +78,7 @@ MTU are not mutated before validation.
 - Linux suite: `python3 -m unittest discover -s tools/tests` → **84 tests, OK (1 skipped)**.
 - OpenBSD 8.0 VM (2205, real `mv`/`ps`/`stat`, no `mv -T`): full suite run
   recorded in `/home/user/r6b-tests.log` (result appended below).
-- Staging tests (`test_installer_r6_staging`) now pass: the `make` shim used
+- Staging tests (test_installer_r6_staging) passed: the `make` shim used  # historical: from other branch
   the chmod shim (record-only) so `obj/ifconfig` was not executable
   (`/bin/chmod`), and `WORK` now honours `TMPDIR` and is kept so the `-I`
   stage is auditable.

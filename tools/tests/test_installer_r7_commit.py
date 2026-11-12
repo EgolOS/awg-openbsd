@@ -28,7 +28,7 @@ class R7Commit(ShRunner, unittest.TestCase):
                   'exec /bin/mv "$@"\n')
             if fail_at == 'directory-fsync':
                 mv = '#!/bin/sh\nexec /bin/mv "$@"\n'
-                body = body.replace('"$WORK/awg-fsync" "$MANIFEST" "$(dirname "$MANIFEST")"',
+                body = body.replace('"$FSYNC_HELPER" "$MANIFEST" "$(dirname "$MANIFEST")"',
                     '(echo forced-record-failure >&2; false)')
             if fail_at == 'unexpected-exit':
                 body = body.replace('publish_pair\n',

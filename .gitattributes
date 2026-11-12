@@ -1,0 +1,4 @@
+# E1-SOURCE: tracked __pycache__ snapshots go stale between releases and
+# shadow fresh sources during unittest discovery in a `git archive` export.
+# export-ignore keeps the tracked-only export byte-clean.
+__pycache__ export-ignore

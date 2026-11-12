@@ -243,6 +243,8 @@ unveil(const char *path, const char *permissions)
 #define	AWG_H_MAX		4294967295LL
 #define	AWG_RANGE_MAX		65535
 #define	AWG_PKA_MAX		43200
+/* G6: cap for the SIOCGAWG size-probe loop (kernel bounds, 239–245). */
+#define	AWG_GET_PROBE_MAX		64
 #ifndef MIN
 #define	MIN(a, b)		((a) < (b) ? (a) : (b))
 #endif
@@ -349,6 +351,22 @@ static void	 state_snapshot(int, const char *, struct if_state *);
 static void	 restore_state(int, struct if_state *);
 static void	 state_free(struct if_state *);
 static int	 show_interface(int, const char *);
+/*
+ * E2: -j/--json machine-readable status. One JSON document per run,
+ * one record per interface and one record per peer, fixed key order.
+ */
+static int	 g_json_output;
+static size_t	 g_json_records;	/* records emitted in this run */
+/* The five timing keys, in flag order (REKEY_AFTER_TIME << slot). */
+static const char *const g_timing_name[5] = { "awgrekeyaftertime",
+    "awgrekeytimeout", "awgrejectaftertime", "awgkeepalivetimeout",
+    "awgmaxhandshakeattempts" };
+static int	 if_link_state(const char *, int *, int *, unsigned int *);
+static void	 show_text(const struct awg_interface_io *, const char *,
+		    char [][AWG_ISPEC_MAXLEN], int, int, int, unsigned int);
+static void	 show_json(const struct awg_interface_io *, const char *,
+		    char [][AWG_ISPEC_MAXLEN], int, int, int, unsigned int);
+static void	 json_finish(void);
 
 /*
  * R4-10/R5/R6: one cleanup path for every exit. The command's parsed config
@@ -423,12 +441,47 @@ usage(void)
 {
 	fprintf(stderr, "usage: awgctl up name [--config path]\n"
 	    "       awgctl down name\n"
-	    "       awgctl show [name]\n"
+	    "       awgctl show [-j] [name]\n"
 	    "       awgctl set name KEY VALUE ...\n"
 	    "       awgctl add name peer pubkey [endpoint ADDR:PORT] "
 	    "[allowed-ips LIST] [psk KEY] [keepalive N]\n"
 	    "       awgctl del name peer pubkey\n");
 	exit(EX_USAGE);
+}
+
+/*
+ * Interface name contract, shared by every verb (R1-2): a name is 1 to
+ * IFNAMSIZ-1 characters from [A-Za-z0-9._-] and does not begin with `-' or
+ * `.'. The kernel stores the name in a fixed IFNAMSIZ byte field, so a longer
+ * name would be truncated by strlcpy() and the command would then act on a
+ * different interface than the one typed; an empty name, a path-like name or
+ * an option-like name never names an interface either. The check runs before
+ * the first ioctl, ifconfig exec or config-path walk, so a rejected name has
+ * no side effect at all.
+ */
+static const char *
+check_ifname(const char *name)
+{
+	const char *p;
+	size_t len;
+
+	len = strlen(name);
+	if (len == 0)
+		errx(EX_USAGE, "interface name is empty");
+	if (len > IFNAMSIZ - 1)
+		errx(EX_USAGE, "%s: interface name is %zu characters, the "
+		    "maximum is %d", name, len, IFNAMSIZ - 1);
+	if (name[0] == '-' || name[0] == '.')
+		errx(EX_USAGE, "%s: interface name must not begin with `%c'",
+		    name, name[0]);
+	for (p = name; *p != '\0'; p++) {
+		if (isalnum((unsigned char)*p) || *p == '_' || *p == '-' ||
+		    *p == '.')
+			continue;
+		errx(EX_USAGE, "%s: interface name contains `%c', which is "
+		    "not one of [A-Za-z0-9._-]", name, *p);
+	}
+	return (name);
 }
 
 /* Strip a trailing '#' comment and surrounding blanks, in place. */
@@ -518,44 +571,87 @@ open_trusted(const char *path)
 		errx(EX_USAGE, "%s: no file under %s", path, CONF_DIR);
 
 	if ((fd = open("/", O_RDONLY | O_CLOEXEC | O_DIRECTORY)) == -1)
-		err(EX_USAGE, "%s", "/");
-	for (i = 0; i < ncomp; i++) {
-		int next, is_last = (i == ncomp - 1);
+			err(EX_USAGE, "%s", "/");
+		for (i = 0; i < ncomp; i++) {
+			int next, is_last = (i == ncomp - 1);
 
-		/* One open per component: O_NOFOLLOW refuses a symlinked
-		 * component, O_NONBLOCK stops a FIFO from blocking. */
-		if ((next = openat(fd, comp[i], O_RDONLY | O_CLOEXEC |
-		    O_NOFOLLOW | (is_last ? O_NONBLOCK : O_DIRECTORY))) == -1)
-			err(EX_USAGE, "%s", path);
-		if (fstat(next, &st) == -1)
-			err(EX_USAGE, "%s", path);
-		close(fd);
-		fd = next;
-		if (is_last) {
-			if (!S_ISREG(st.st_mode))
-				errx(EX_USAGE, "%s: not a regular file", path);
-			if (!CONF_OWNER_OK(st.st_uid))
-				errx(EX_USAGE, "%s must be root-owned — it "
+			/* One open per component: O_NOFOLLOW refuses a symlinked
+			 * component, O_NONBLOCK stops a FIFO from blocking. */
+			if ((next = openat(fd, comp[i], O_RDONLY | O_CLOEXEC |
+			    O_NOFOLLOW | (is_last ? O_NONBLOCK : O_DIRECTORY))) == -1)
+				err(EX_USAGE, "%s", path);
+			if (fstat(next, &st) == -1)
+				err(EX_USAGE, "%s", path);
+			close(fd);
+			fd = next;
+			if (is_last) {
+				if (!S_ISREG(st.st_mode))
+					errx(EX_USAGE, "%s: not a regular file", path);
+				if (!CONF_OWNER_OK(st.st_uid))
+					errx(EX_USAGE, "%s must be root-owned — it "
 					    "holds the private key", path);
-			if ((st.st_mode & 0777) != 0600 &&
-			    (st.st_mode & 0777) != 0400)
-				errx(EX_USAGE, "%s is mode %o — it holds the "
+				if ((st.st_mode & 0777) != 0600 &&
+				    (st.st_mode & 0777) != 0400)
+					errx(EX_USAGE, "%s is mode %o — it holds the "
 					    "private key; chmod 600 it", path,
-				    st.st_mode & 0777);
-		} else {
-			if (!S_ISDIR(st.st_mode))
-				errx(EX_USAGE, "%s: component `%s' is not a "
+					    st.st_mode & 0777);
+			} else {
+				/*
+				 * Every directory on the path from "/" down to and
+				 * including the immediate parent is validated, as the
+				 * man page states: a writable directory anywhere above
+				 * the file lets another user replace the file or a
+				 * directory it lives in, so the mode check on the file
+				 * alone would not be a trust proof.
+				 */
+				if (!S_ISDIR(st.st_mode))
+					errx(EX_USAGE, "%s: component `%s' is not a "
 					    "directory", path, comp[i]);
-			if (!CONF_OWNER_OK(st.st_uid) ||
-			    (st.st_mode & 0022) != 0)
-				errx(EX_USAGE, "%s: component `%s' must be "
-					    "root-owned and not "
-					    "group/other-writable", path,
-				    comp[i]);
+				if (!CONF_OWNER_OK(st.st_uid))
+					errx(EX_USAGE, "%s: directory `%s' is not "
+					    "root-owned", path, comp[i]);
+				if ((st.st_mode & 0022) != 0)
+					errx(EX_USAGE, "%s: directory `%s' must not be "
+					    "group/other-writable", path, comp[i]);
+			}
 		}
-	}
 	free(copy);
 	return fd;
+}
+
+/*
+ * G6: the largest accepted config line and secret line, newline included.
+ * getline(3)'s size argument is an allocation hint only — a 4096 hint still
+ * accepts a 64 KiB line and grows the buffer to whatever the file holds —
+ * so the readers below copy at most `cap - 1` bytes and report a longer
+ * line before it is parsed. The bound is enforced, not suggested.
+ */
+#define	AWG_CONFIG_LINE_MAX	8192
+#define	AWG_SECRET_LINE_MAX	128
+
+/*
+ * Read one line from `f` into `buf` (capacity `cap`, always NUL-terminated).
+ * Returns the byte count (newline included, 0 at end of file) or -1 when the
+ * line does not fit in `cap - 1` bytes. NUL bytes inside the line are copied
+ * verbatim, so the caller's memchr(3) truncation test still sees them.
+ */
+static ssize_t
+read_line_bounded(FILE *f, char *buf, size_t cap)
+{
+	size_t n = 0;
+	int c;
+
+	while ((c = getc(f)) != EOF) {
+		if (n + 1 >= cap) {
+			buf[n] = '\0';
+			return (-1);
+		}
+		buf[n++] = (char)c;
+		if (c == '\n')
+			break;
+	}
+	buf[n] = '\0';
+	return ((ssize_t)n);
 }
 
 /*
@@ -566,8 +662,7 @@ open_trusted(const char *path)
 static char *
 read_secret(const char *val)
 {
-	char *line = NULL;
-	size_t len = 0;
+	char buf[AWG_SECRET_LINE_MAX], *out;
 	ssize_t n;
 
 	/* R4-10: "-" (stdin) is the documented form; a literal stays visible
@@ -577,11 +672,18 @@ read_secret(const char *val)
 		    "the process listing; prefer '-' (stdin)");
 		return strdup(val);
 	}
-	if ((n = getline(&line, &len, stdin)) == -1)
+	if ((n = read_line_bounded(stdin, buf, sizeof(buf))) == -1)
+		errx(EX_CONFIG, "secret line is longer than %zu bytes",
+		    sizeof(buf) - 1);
+	if (n == 0)
 		err(EX_USAGE, "reading key from stdin");
-	while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
-		line[--n] = '\0';
-	return line;
+	while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+		buf[--n] = '\0';
+	if ((out = strdup(buf)) == NULL)
+		err(EX_USAGE, "strdup");
+	/* D4: the stack copy is wiped before it goes out of scope. */
+	explicit_bzero(buf, sizeof(buf));
+	return out;
 }
 
 /* "N" or "N-M", both ends at most max — ifconfig's parseawgrange. */
@@ -681,18 +783,32 @@ static void
 parse_config(int fd, const char *path, struct cfg *c)
 {
 	FILE *f;
-	char *line = NULL;
-	size_t linesize = 0;
+	char *line, *key, *value;
 	ssize_t nread;
 	int in_interface = 0, in_peer = 0;
 	struct peer_cfg *p = NULL;
-	char *key, *value;
+
+	/* D4: the raw line buffer carries the PrivateKey/PresharedKey text of
+	 * the line being parsed, so it is a fixed-capacity, registered buffer:
+	 * the atexit cleanup wipes it on the errx() refusals below and
+	 * secret_free() wipes and frees it on the success path. */
+	if ((line = calloc(1, AWG_CONFIG_LINE_MAX)) == NULL)
+		err(EX_USAGE, "calloc");
+	secret_register(line, AWG_CONFIG_LINE_MAX);
 
 	/* R4-07: the descriptor was opened and verified by open_trusted(). */
 	if ((f = fdopen(fd, "r")) == NULL)
 		err(EX_USAGE, "%s", path);
 
-	while ((nread = getline(&line, &linesize, f)) != -1) {
+	for (;;) {
+		/* G6: a line longer than the bound is refused instead of
+		 * being read into an arbitrarily large allocation. */
+		if ((nread = read_line_bounded(f, line,
+		    AWG_CONFIG_LINE_MAX)) == -1)
+			errx(EX_CONFIG, "%s: line longer than %d bytes",
+			    path, AWG_CONFIG_LINE_MAX - 1);
+		if (nread == 0)
+			break;
 		/* R7/N12: a NUL inside the file marks a truncated config —
 		 * the bytes after it are never parsed, so refuse the whole
 		 * file before any mutation instead of applying the prefix
@@ -961,7 +1077,7 @@ parse_config(int fd, const char *path, struct cfg *c)
 		err(EX_USAGE, "%s", path);
 	if (fclose(f) != 0)
 		err(EX_USAGE, "%s", path);
-	free(line);
+	secret_free(line, AWG_CONFIG_LINE_MAX);
 
 	if (c->c_private == NULL)
 		errx(EX_CONFIG, "PrivateKey not set in %s", path);
@@ -1156,11 +1272,19 @@ serialise_config(struct awg_data_io *d, struct cfg *c)
 
 	if (c->c_update_private && c->c_private != NULL) {
 		ip->i_flags |= AWG_INTERFACE_HAS_PRIVATE;
-		b64_pton(c->c_private, ip->i_private, sizeof(ip->i_private));
+		/* G8: a short decode must not pass a truncated key to the
+		 * kernel silently — the return is the decoded length. */
+		if (b64_pton(c->c_private, ip->i_private,
+		    sizeof(ip->i_private)) != (int)sizeof(ip->i_private))
+			erx(EX_CONFIG, "PrivateKey (key): invalid base64");
 	}
 	if (c->c_update_hpk && c->c_hpk != NULL) {
 		ip->i_flags |= AWG_INTERFACE_HAS_HPK;
-		b64_pton(c->c_hpk, ip->i_hpk, sizeof(ip->i_hpk));
+		/* G8 */
+		if (b64_pton(c->c_hpk, ip->i_hpk,
+		    sizeof(ip->i_hpk)) != (int)sizeof(ip->i_hpk))
+			erx(EX_CONFIG, "HeaderProtectionKey (key): "
+			    "invalid base64");
 	}
 	if (c->c_has_port) {
 		ip->i_flags |= AWG_INTERFACE_HAS_PORT;
@@ -1254,10 +1378,17 @@ serialise_config(struct awg_data_io *d, struct cfg *c)
 		pp->p_flags |= AWG_PEER_HAS_PUBLIC;
 		if (pc->pc_remove)
 			pp->p_flags |= AWG_PEER_REMOVE;
-		b64_pton(pc->pc_pubkey, pp->p_public, sizeof(pp->p_public));
+		/* G8: check the decode, like load_key does. */
+		if (b64_pton(pc->pc_pubkey, pp->p_public,
+		    sizeof(pp->p_public)) != (int)sizeof(pp->p_public))
+			erx(EX_CONFIG, "PublicKey (key): invalid base64");
 		if (pc->pc_psk != NULL) {
 			pp->p_flags |= AWG_PEER_HAS_PSK;
-			b64_pton(pc->pc_psk, pp->p_psk, sizeof(pp->p_psk));
+			/* G8 */
+			if (b64_pton(pc->pc_psk, pp->p_psk,
+			    sizeof(pp->p_psk)) != (int)sizeof(pp->p_psk))
+				erx(EX_CONFIG, "PresharedKey (key): "
+				    "invalid base64");
 		}
 		if (pc->pc_pka != NULL) {
 			struct awg_range r;
@@ -1322,6 +1453,23 @@ serialise_config(struct awg_data_io *d, struct cfg *c)
 }
 
 /*
+ * G7: copy the interface name into the ioctl name field. strlcpy silently
+ * truncates a name longer than awgd_name (IFNAMSIZ bytes — src/if_awg.h:169
+ * — which is 16 on OpenBSD), so the caller would operate on a truncated
+ * interface with no diagnostic: refuse instead. Every ioctl name site goes
+ * through here (apply_config cmd_up, show_interface, read_current,
+ * state_snapshot).
+ */
+static void
+set_awgd_name(struct awg_data_io *d, const char *name)
+{
+	if (strlen(name) >= sizeof(d->awgd_name))
+		erx(EX_USAGE, "%s: interface name longer than %zu bytes",
+		    name, sizeof(d->awgd_name) - 1);
+	strlcpy(d->awgd_name, name, sizeof(d->awgd_name));
+}
+
+/*
  * One SIOCSAWG carrying the serialised interface and peers.  R7/R4-08: the
  * mutation half — serialise_config() has parsed, resolved and built the
  * whole payload first, so an operational failure restores the state captured
@@ -1335,14 +1483,12 @@ apply_config(int s, const char *name, struct cfg *c, struct if_state *prev)
 	struct awg_data_io d;
 
 	memset(&d, 0, sizeof(d));
-	strlcpy(d.awgd_name, name, sizeof(d.awgd_name));
+	set_awgd_name(&d, name);
 	serialise_config(&d, c);
 	if (ioctl(s, SIOCSAWG, &d) == -1) {
-		int e = errno;
-
 		restore_state(s, prev);
 		secret_free(d.awgd_interface, d.awgd_size);
-		errx(e, "%s: SIOCSAWG", d.awgd_name);
+		err(EX_IOCTL, "%s: SIOCSAWG", d.awgd_name);
 	}
 	/* R4-10: the serialised buffer carries the private key and PSKs. */
 	secret_free(d.awgd_interface, d.awgd_size);
@@ -1365,24 +1511,23 @@ show_interface(int s, const char *name)
 	static char ispec[AWG_ISPEC_COUNT][AWG_ISPEC_MAXLEN];
 	struct awg_data_io d;
 	struct awg_interface_io *ip;
-	struct awg_peer_io *pp;
-	struct awg_aip_io *ap;
-	struct timespec now;
-	size_t i, j, last_size;
+	size_t i, last_size, alloc;
 	unsigned int iter = 0;
 	int dbg = getenv("AWGCTL_DEBUG") != NULL;
-	char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
-	char key[AWG_BASE64_KEY_LEN + 1];
-	struct awg_range *timing[5];
-	const char *timing_name[5] = { "awgrekeyaftertime",
-	    "awgrekeytimeout", "awgrejectaftertime", "awgkeepalivetimeout",
-	    "awgmaxhandshakeattempts" };
+	int have_link, link_up, have_mtu = 0;
+	unsigned int link_mtu = 0;
 
 	memset(&d, 0, sizeof(d));
-	strlcpy(d.awgd_name, name, sizeof(d.awgd_name));
+	set_awgd_name(&d, name);
 	d.awgd_size = sizeof(struct awg_interface_io);
 	if ((d.awgd_interface = calloc(1, d.awgd_size)) == NULL)
 		err(EX_USAGE, "calloc");
+	/* G3: register the GET buffer (private key + PSKs) with the atexit
+	 * cleanup so every exit path — including err() — wipes it. `alloc`
+	 * tracks the LIVE capacity: the wipe must use the bytes actually
+	 * allocated, never the size the kernel asks for next. */
+	alloc = d.awgd_size;
+	secret_register(d.awgd_interface, alloc);
 	for (i = 0; i < AWG_ISPEC_COUNT; i++) {
 		d.awgd_interface->i_ispec[i] = ispec[i];
 		d.awgd_interface->i_ispec_len[i] = sizeof(ispec[i]);
@@ -1392,6 +1537,12 @@ show_interface(int s, const char *name)
 		int saved_errno;
 
 		iter++;
+		/* G6: cap the size-probe loop; the kernel contract
+		 * (239–245) converges in a handful of rounds. */
+		if (iter > AWG_GET_PROBE_MAX)
+			errx(EX_IOCTL, "%s: SIOCGAWG size probe did not "
+			    "converge in %u iterations", d.awgd_name,
+			    AWG_GET_PROBE_MAX);
 		if (ioctl(s, SIOCGAWG, &d) < 0) {
 			saved_errno = errno;
 			if (dbg)
@@ -1403,9 +1554,7 @@ show_interface(int s, const char *name)
 			if (saved_errno == ENOTTY) {
 				/* R4-09: an explicitly named target that the
 				 * driver rejects must report failure. */
-				explicit_bzero(d.awgd_interface,
-				    d.awgd_size);
-				free(d.awgd_interface);
+				secret_free(d.awgd_interface, alloc);
 				return (1);
 			}
 			errno = saved_errno;
@@ -1418,9 +1567,18 @@ show_interface(int s, const char *name)
 			    iter, last_size, d.awgd_size);
 		if (last_size >= d.awgd_size)
 			break;
+		/* D4: wipe the key-bearing block before realloc(3) frees it.
+		 * The previous copy held the private key and PSKs the kernel
+		 * returned, so a plain realloc leaves them in the heap. The
+		 * wipe covers `alloc` bytes — the live capacity — not the
+		 * larger size just requested. */
+		explicit_bzero(d.awgd_interface, alloc);
 		d.awgd_interface = realloc(d.awgd_interface, d.awgd_size);
 		if (d.awgd_interface == NULL)
 			err(EX_USAGE, "realloc");
+		/* G3: the registered slot follows the grown allocation. */
+		alloc = d.awgd_size;
+		secret_register(d.awgd_interface, alloc);
 		for (i = 0; i < AWG_ISPEC_COUNT; i++) {
 			d.awgd_interface->i_ispec[i] = ispec[i];
 			d.awgd_interface->i_ispec_len[i] = sizeof(ispec[i]);
@@ -1429,7 +1587,66 @@ show_interface(int s, const char *name)
 	}
 	ip = d.awgd_interface;
 
+	/*
+	 * E2: the interface state (IFF_UP) and the MTU are not in the
+	 * SIOCGAWG buffer — they are the kernel's if_data for the interface,
+	 * served by the AF_LINK entry of getifaddrs(3). They are reported
+	 * only when the kernel serves them.
+	 */
+	have_link = if_link_state(name, &link_up, &have_mtu, &link_mtu);
+	if (g_json_output) {
+		/* One array for the run: the first record opens it, the
+		 * caller closes it once, so a failed get adds no record. */
+		fputs(g_json_records++ == 0 ? "[\n" : ",\n", stdout);
+		show_json(ip, name, ispec, have_link, link_up, have_mtu,
+		    link_mtu);
+	} else
+		show_text(ip, name, ispec, have_link, link_up, have_mtu,
+		    link_mtu);
+	/* R4-10: the get buffer holds the private key and peer PSKs. */
+	explicit_bzero(d.awgd_interface, d.awgd_size);
+	free(d.awgd_interface);
+	return (0);
+}
+
+/*
+ * E2: close the JSON document. No record at all (no awg interface, or a
+ * get the driver rejected) still leaves a document a script can parse.
+ */
+static void
+json_finish(void)
+{
+	if (!g_json_output)
+		return;
+	if (g_json_records == 0)
+		fputs("[]\n", stdout);
+	else
+		fputs("\n]\n", stdout);
+}
+
+/*
+ * E2: human-readable status. One "key value" line per kernel-held field, in
+ * the order awgctl(8) documents; a peer's counters are one "tx: N, rx: N"
+ * line so an operator and the lab scripts read the same shape.
+ */
+static void
+show_text(const struct awg_interface_io *ip, const char *name,
+    char ispec[][AWG_ISPEC_MAXLEN], int have_link, int link_up, int have_mtu,
+    unsigned int link_mtu)
+{
+	char key[AWG_BASE64_KEY_LEN + 1];
+	char hbuf[NI_MAXHOST], sbuf[NI_MAXSERV];
+	const struct awg_peer_io *pp;
+	const struct awg_aip_io *ap;
+	struct timespec now;
+	const struct awg_range *timing[5];
+	size_t i, j;
+
 	printf("%s:\n", name);
+	if (have_link)
+		printf("\tawgstate %s\n", link_up ? "up" : "down");
+	if (have_mtu)
+		printf("\tawgmtu %u\n", link_mtu);
 	if (ip->i_flags & AWG_INTERFACE_HAS_PORT)
 		printf("\tawgport %hu\n", ip->i_port);
 	if (ip->i_flags & AWG_INTERFACE_HAS_RTABLE)
@@ -1495,9 +1712,9 @@ show_interface(int s, const char *name)
 		    || timing[i]->r_hi == 0)
 			continue;
 		if (timing[i]->r_lo == timing[i]->r_hi)
-			printf("\t%s %u\n", timing_name[i], timing[i]->r_lo);
+			printf("\t%s %u\n", g_timing_name[i], timing[i]->r_lo);
 		else
-			printf("\t%s %u-%u\n", timing_name[i],
+			printf("\t%s %u-%u\n", g_timing_name[i],
 			    timing[i]->r_lo, timing[i]->r_hi);
 	}
 	if (ip->i_flags & AWG_INTERFACE_HAS_TRAILERS && ip->i_random_trailers)
@@ -1545,30 +1762,319 @@ show_interface(int s, const char *name)
 		}
 		pp = (struct awg_peer_io *)ap;
 	}
-	/* R4-10: the get buffer holds the private key and peer PSKs. */
-	explicit_bzero(d.awgd_interface, d.awgd_size);
-	free(d.awgd_interface);
-	return (0);
+	explicit_bzero(key, sizeof(key));
 }
 
 /*
- * Read the interface's current state with SIOCGAWG (same size-probe loop as
- * show_interface) and seed a cfg with it. `set` names a few keys; the kernel
- * applies grouped fields as a unit (Jc/Jmin/Jmax, S1/S2, H1-H4), so the
- * siblings the command leaves out come from here instead of from a zeroed
- * struct.
+ * E2: JSON string body, including the quotes. awgctl never emits ANSI, so the
+ * only escaping that can occur here is JSON's own.
+ */
+static void
+json_str(const char *s)
+{
+	const unsigned char *p;
+
+	putchar(0x22);
+	for (p = (const unsigned char *)s; *p != 0; p++) {
+		if (*p == 0x22 || *p == 0x5c) {
+			/* Quote or backslash: escape with a backslash. */
+			putchar(0x5c);
+			putchar(*p);
+		} else if (*p == 0x08) {
+			putchar(0x5c);
+			putchar('b');
+		} else if (*p == 0x0c) {
+			putchar(0x5c);
+			putchar('f');
+		} else if (*p == 0x0a) {
+			putchar(0x5c);
+			putchar('n');
+		} else if (*p == 0x0d) {
+			putchar(0x5c);
+			putchar('r');
+		} else if (*p == 0x09) {
+			putchar(0x5c);
+			putchar('t');
+		} else if (*p < 0x20) {
+			/* The rest of the C0 range: \u00XX. */
+			printf("%c%c%04x", 0x5c, 'u', *p);
+		} else {
+			putchar(*p);
+		}
+	}
+	putchar(0x22);
+}
+
+/*
+ * E2: a range is one number when both bounds agree and a quoted "lo-hi"
+ * otherwise — the same rule the text output uses, so a script reading either
+ * form sees one value for one kernel field.
+ */
+static void
+json_range(const struct awg_range *r)
+{
+	if (r->r_lo == r->r_hi) {
+		printf("%u", r->r_lo);
+		return;
+	}
+	putchar(0x22);
+	printf("%u-%u", r->r_lo, r->r_hi);
+	putchar(0x22);
+}
+
+/*
+ * E2: render a peer endpoint as "host:port" (or "[host]:port" for IPv6). The
+ * JSON form is rendered from the sockaddr bytes rather than through
+ * getnameinfo(3), which needs the OpenBSD sa_len that the Linux build shim
+ * does not have; both carriers come straight from the kernel's endpoint.
  */
 static int
-read_current(int s, const char *name, struct cfg *c)
+format_endpoint(const struct sockaddr *sa, char *buf, size_t n)
+{
+	char host[INET6_ADDRSTRLEN];
+	unsigned int port;
+
+	switch (sa->sa_family) {
+	case AF_INET:
+		if (inet_ntop(AF_INET,
+		    &((const struct sockaddr_in *)sa)->sin_addr,
+		    host, sizeof(host)) == NULL)
+			return (-1);
+		port = ntohs(((const struct sockaddr_in *)sa)->sin_port);
+		snprintf(buf, n, "%s:%u", host, port);
+		return (0);
+	case AF_INET6:
+		if (inet_ntop(AF_INET6,
+		    &((const struct sockaddr_in6 *)sa)->sin6_addr,
+		    host, sizeof(host)) == NULL)
+			return (-1);
+		port = ntohs(((const struct sockaddr_in6 *)sa)->sin6_port);
+		snprintf(buf, n, "[%s]:%u", host, port);
+		return (0);
+	default:
+		return (-1);
+	}
+}
+
+/*
+ * E2: machine-readable status. Fixed key order, no ANSI, one record per peer.
+ * Every key maps to a field the kernel actually filled: the SIOCGAWG buffer
+ * for the interface and peer fields, the AF_LINK if_data for the state and
+ * the MTU. A field the kernel does not hold (an unset AWG_INTERFACE_HAS_*
+ * flag, a peer that never handshaked) produces no key at all, and nothing is
+ * derived from the clock, so two runs over unchanged kernel state are
+ * byte-identical.
+ */
+static void
+show_json(const struct awg_interface_io *ip, const char *name,
+    char ispec[][AWG_ISPEC_MAXLEN], int have_link, int link_up, int have_mtu,
+    unsigned int link_mtu)
+{
+	char key[AWG_BASE64_KEY_LEN + 1];
+	char hbuf[NI_MAXHOST];
+	char aip[NI_MAXHOST + NI_MAXSERV + 8];
+	const struct awg_peer_io *pp;
+	const struct awg_aip_io *ap;
+	const struct awg_range *timing[5];
+	size_t i, j;
+	int slot;
+
+	fputs("{\n  \"name\": ", stdout);
+	json_str(name);
+	if (have_link) {
+		fputs(",\n  \"state\": ", stdout);
+		json_str(link_up ? "up" : "down");
+	}
+	if (have_mtu)
+		printf(",\n  \"mtu\": %u", link_mtu);
+	if (ip->i_flags & AWG_INTERFACE_HAS_PORT)
+		printf(",\n  \"awgport\": %hu", ip->i_port);
+	if (ip->i_flags & AWG_INTERFACE_HAS_RTABLE)
+		printf(",\n  \"awgrtable\": %d", ip->i_rtable);
+	if (ip->i_flags & AWG_INTERFACE_HAS_PUBLIC) {
+		b64_ntop(ip->i_public, AWG_KEY_LEN, key, sizeof(key));
+		fputs(",\n  \"awgpubkey\": ", stdout);
+		json_str(key);
+	}
+	if (ip->i_flags & AWG_INTERFACE_HAS_VERSION) {
+		fputs(",\n  \"awgversion\": ", stdout);
+		json_str(ip->i_version == AWG_VERSION_3_1 ? "3.1" : "legacy");
+	}
+	if (ip->i_flags & AWG_INTERFACE_HAS_JC)
+		printf(",\n  \"awgjc\": %u,\n  \"awgjmin\": %u,"
+		    "\n  \"awgjmax\": %u", ip->i_jc, ip->i_jmin,
+		    ip->i_jmax);
+	if (ip->i_flags & AWG_INTERFACE_HAS_S12) {
+		printf(",\n  \"awgs1\": %u,\n  \"awgs2\": %u",
+		    ip->i_s1, ip->i_s2);
+		if (ip->i_flags & AWG_INTERFACE_HAS_S3)
+			printf(",\n  \"awgs3\": %u", ip->i_s3);
+		if (ip->i_flags & AWG_INTERFACE_HAS_S4)
+			printf(",\n  \"awgs4\": %u", ip->i_s4);
+	}
+	if (ip->i_flags & AWG_INTERFACE_HAS_H) {
+		fputs(",\n  \"awgh1\": ", stdout);
+		json_range(&ip->i_h1);
+		fputs(",\n  \"awgh2\": ", stdout);
+		json_range(&ip->i_h2);
+		fputs(",\n  \"awgh3\": ", stdout);
+		json_range(&ip->i_h3);
+		fputs(",\n  \"awgh4\": ", stdout);
+		json_range(&ip->i_h4);
+	}
+	for (i = 0; i < AWG_ISPEC_COUNT; i++) {
+		if (!(ip->i_flags & AWG_INTERFACE_HAS_I(i)) ||
+		    ip->i_ispec_len[i] > sizeof(ispec[i]))
+			continue;
+		printf(",\n  \"awgi%zu\": ", i + 1);
+		json_str(ispec[i]);
+	}
+	if (ip->i_flags & AWG_INTERFACE_HAS_HPK)
+		fputs(",\n  \"awghpk\": true", stdout);
+	if ((ip->i_flags & AWG_INTERFACE_HAS_CPA) && ip->i_cpa.r_hi != 0) {
+		fputs(",\n  \"awgcpa\": ", stdout);
+		json_range(&ip->i_cpa);
+	}
+	timing[0] = &ip->i_rekey_after_time;
+	timing[1] = &ip->i_rekey_timeout;
+	timing[2] = &ip->i_reject_after_time;
+	timing[3] = &ip->i_keepalive_timeout;
+	timing[4] = &ip->i_max_handshake_attempts;
+	for (slot = 0; slot < 5; slot++) {
+		if (!(ip->i_flags &
+		    (AWG_INTERFACE_HAS_REKEY_AFTER_TIME << slot)) ||
+		    timing[slot]->r_hi == 0)
+			continue;
+		printf(",\n  \"%s\": ", g_timing_name[slot]);
+		json_range(timing[slot]);
+	}
+	if ((ip->i_flags & AWG_INTERFACE_HAS_TRAILERS) && ip->i_random_trailers)
+		fputs(",\n  \"awgrandomtrailers\": true", stdout);
+	if ((ip->i_flags & AWG_INTERFACE_HAS_COOKIES) && ip->i_disable_cookies)
+		fputs(",\n  \"awgdisablecookies\": true", stdout);
+
+	fputs(",\n  \"peers\": [", stdout);
+	pp = &ip->i_peers[0];
+	for (i = 0; i < ip->i_peers_count; i++) {
+		b64_ntop(pp->p_public, AWG_KEY_LEN, key, sizeof(key));
+		if (i > 0)
+			putchar(',');
+		fputs("\n    {\n      \"awgpeer\": ", stdout);
+		json_str(key);
+		fputs(",\n      \"awgdescr\": ", stdout);
+		json_str(pp->p_description);
+		if (pp->p_flags & AWG_PEER_HAS_PSK)
+			fputs(",\n      \"awgpsk\": true", stdout);
+		if ((pp->p_flags & AWG_PEER_HAS_PKA) && pp->p_pka != 0) {
+			fputs(",\n      \"awgpka\": ", stdout);
+			if (pp->p_pka_hi > pp->p_pka) {
+				putchar(0x22);
+				printf("%u-%u", pp->p_pka, pp->p_pka_hi);
+				putchar(0x22);
+			} else
+				printf("%u", pp->p_pka);
+		}
+		if (pp->p_flags & AWG_PEER_HAS_ENDPOINT) {
+			fputs(",\n      \"awgendpoint\": ", stdout);
+			if (format_endpoint(&pp->p_sa, aip, sizeof(aip)) == 0)
+				json_str(aip);
+			else
+				json_str("unprintable");
+		}
+		printf(",\n      \"tx\": %llu,\n      \"rx\": %llu",
+		    (unsigned long long)pp->p_txbytes,
+		    (unsigned long long)pp->p_rxbytes);
+		/*
+		 * The kernel's own timestamp, not an age derived from the
+		 * clock: a script can subtract the clock itself, and two runs
+		 * see the same value. tv_sec == 0 means never handshaked.
+		 */
+		if (pp->p_last_handshake.tv_sec != 0)
+			printf(",\n      \"last_handshake\": %lld",
+			    (long long)pp->p_last_handshake.tv_sec);
+		fputs(",\n      \"awgaip\": [", stdout);
+		ap = &pp->p_aips[0];
+		for (j = 0; j < pp->p_aips_count; j++) {
+			if (j > 0)
+				fputs(", ", stdout);
+			if (inet_ntop(ap->a_af, &ap->a_addr, hbuf,
+			    sizeof(hbuf)) == NULL)
+				json_str("unprintable");
+			else {
+				snprintf(aip, sizeof(aip), "%s/%d", hbuf,
+				    ap->a_cidr);
+				json_str(aip);
+			}
+			ap++;
+		}
+		putchar(']');
+		fputs("\n    }", stdout);
+		pp = (const struct awg_peer_io *)ap;
+	}
+	if (ip->i_peers_count > 0)
+		fputs("\n  ]", stdout);
+	else
+		fputs("]", stdout);
+	fputs("\n}", stdout);
+}
+
+/*
+ * E2: the interface MTU and the IFF_UP flag are not in the SIOCGAWG buffer.
+ * They are the kernel's if_data, served for the AF_LINK entry of
+ * getifaddrs(3) — the same source `up` snapshots before it overwrites an
+ * interface. Returns 1 when the interface was found; *have_mtu stays 0 when
+ * the kernel served no if_data, so the caller reports no MTU rather than one
+ * it never read.
+ */
+static int
+if_link_state(const char *name, int *up, int *have_mtu, unsigned int *mtu)
+{
+	struct ifaddrs *ifa0, *ifa;
+	int found = 0;
+
+	*up = 0;
+	*have_mtu = 0;
+	*mtu = 0;
+	if (getifaddrs(&ifa0) == -1)
+		return (0);
+	for (ifa = ifa0; ifa != NULL; ifa = ifa->ifa_next) {
+		/* R5: ifa_name is not guaranteed by every getifaddrs(3). */
+		if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL ||
+		    ifa->ifa_addr->sa_family != AF_LINK ||
+		    strcmp(ifa->ifa_name, name) != 0)
+			continue;
+		found = 1;
+		*up = (ifa->ifa_flags & IFF_UP) != 0;
+		if (ifa->ifa_data != NULL) {
+			*have_mtu = 1;
+			*mtu = ((const struct if_data *)
+			    ifa->ifa_data)->ifi_mtu;
+		}
+		break;
+	}
+	freeifaddrs(ifa0);
+		return (found);
+	}
+
+	/*
+	 * Read the interface's current state with SIOCGAWG (same size-probe loop as
+	 * show_interface) and seed a cfg with it. `set` names a few keys; the kernel
+	 * applies grouped fields as a unit (Jc/Jmin/Jmax, S1/S2, H1-H4), so the
+	 * siblings the command leaves out come from here instead of from a zeroed
+	 * struct.
+	 */
+	static int
+	read_current(int s, const char *name, struct cfg *c)
 {
 	static char ispec[AWG_ISPEC_COUNT][AWG_ISPEC_MAXLEN];
 	struct awg_data_io d;
 	struct awg_interface_io *ip;
 	size_t i, last_size, alloc;
+	unsigned int iter = 0;
 	char key[AWG_BASE64_KEY_LEN + 1];
 
 	memset(&d, 0, sizeof(d));
-	strlcpy(d.awgd_name, name, sizeof(d.awgd_name));
+	set_awgd_name(&d, name);
 	d.awgd_size = sizeof(struct awg_interface_io);
 	if ((d.awgd_interface = calloc(1, d.awgd_size)) == NULL)
 		err(EX_USAGE, "calloc");
@@ -1585,12 +2091,17 @@ read_current(int s, const char *name, struct cfg *c)
 	for (;;) {
 		int saved_errno;
 
+		/* G6: cap the size-probe loop like show_interface. */
+		if (++iter > AWG_GET_PROBE_MAX)
+			errx(EX_IOCTL, "%s: SIOCGAWG size probe did not "
+			    "converge in %u iterations", d.awgd_name,
+			    AWG_GET_PROBE_MAX);
 		if (ioctl(s, SIOCGAWG, &d) < 0) {
 			saved_errno = errno;
 			/* R5/R4-09: a probe failure is a real failure — the
 			 * caller gets the errno instead of a zeroed seed. */
 			if (saved_errno == ENOTTY) {
-				secret_free(d.awgd_interface, d.awgd_size);
+				secret_free(d.awgd_interface, alloc);
 				errno = saved_errno;
 				return (1);
 			}
@@ -1675,7 +2186,7 @@ read_current(int s, const char *name, struct cfg *c)
 	/* R6/R4-10: the stack key holds the private key (then the HPK)
 	 * after the b64_ntop copies — wipe it, not just the heap buffer. */
 	explicit_bzero(key, sizeof(key));
-	secret_free(d.awgd_interface, d.awgd_size);
+	secret_free(d.awgd_interface, alloc);
 	return (0);
 }
 
@@ -1954,7 +2465,10 @@ state_snapshot(int s, const char *ifname, struct if_state *st)
 	st->is_ifname = ifname;
 	memset(&probe, 0, sizeof(probe));
 	memset(&base, 0, sizeof(base));
-	strlcpy(probe.awgd_name, ifname, sizeof(probe.awgd_name));
+	/* G7: same checked copy as every other ioctl site — the name was
+	 * already validated by cmd_up's set_awgd_name, so this is the
+	 * defence against a future caller that skips it. */
+	set_awgd_name(&probe, ifname);
 	/* awg_ioctl_get copies the base struct before consulting
 	 * awgd_size, so the probe needs a real buffer. */
 	probe.awgd_size = sizeof(base);
@@ -2223,7 +2737,7 @@ cmd_up(int s, const struct request *r)
 	 * the allowed-IPs (inet_net_pton) — before the first mutation, so a
 	 * bad endpoint or allowed-IP leaves the interface untouched. */
 	memset(&d, 0, sizeof(d));
-	strlcpy(d.awgd_name, ifname, sizeof(d.awgd_name));
+	set_awgd_name(&d, ifname);
 	serialise_config(&d, &c);
 
 	/* R7/R4-08: capture the pre-up state (existence, MTU, addresses) so
@@ -2254,16 +2768,14 @@ cmd_up(int s, const struct request *r)
 		install_address(s, ifname, c.c_addrs[i], &prev);
 
 	/* R7/R4-08: the single mutation.  On an operational failure the
-	 * state captured above is restored — a fresh interface is destroyed,
-	 * a pre-existing one gets its MTU and addresses back. */
-	if (ioctl(s, SIOCSAWG, &d) == -1) {
-		int e = errno;
-
-		restore_state(s, &prev);
-		secret_free(d.awgd_interface, d.awgd_size);
-		state_free(&prev);
-		erx(e, "%s: SIOCSAWG", d.awgd_name);
-	}
+		 * state captured above is restored — a fresh interface is destroyed,
+		 * a pre-existing one gets its MTU and addresses back. */
+		if (ioctl(s, SIOCSAWG, &d) == -1) {
+			restore_state(s, &prev);
+			secret_free(d.awgd_interface, d.awgd_size);
+			state_free(&prev);
+			err(EX_IOCTL, "%s: SIOCSAWG", d.awgd_name);
+		}
 	/* R4-10: the serialised buffer carries the private key and PSKs. */
 	secret_free(d.awgd_interface, d.awgd_size);
 
@@ -2286,18 +2798,21 @@ cmd_down(int s, int argc, char **argv)
 	/* R5/R4-09: exact arity — surplus arguments are an error. */
 	if (argc != 1)
 		usage();
+	check_ifname(argv[0]);
 	/* Remove every peer, then bring down and destroy. */
 	{
 		struct awg_data_io d;
 
 		memset(&d, 0, sizeof(d));
-		strlcpy(d.awgd_name, argv[0], sizeof(d.awgd_name));
+		set_awgd_name(&d, argv[0]);
 		d.awgd_size = sizeof(struct awg_interface_io);
 		if ((d.awgd_interface = calloc(1, d.awgd_size)) == NULL)
 			err(EX_USAGE, "calloc");
 		d.awgd_interface->i_flags = AWG_INTERFACE_REPLACE_PEERS;
 		if (ioctl(s, SIOCSAWG, &d) == -1)
 			err(EX_IOCTL, "%s: SIOCSAWG", d.awgd_name);
+		/* G10: wipe the SET buffer, like the other ioctl paths. */
+		explicit_bzero(d.awgd_interface, d.awgd_size);
 		free(d.awgd_interface);
 	}
 	av[0] = (char *)IFCONFIG_PATH;
@@ -2314,13 +2829,23 @@ cmd_show(int s, int argc, char **argv)
 	size_t ncount = 0;
 	int rc = 0;
 
+	/* E2: an output mode, not a target: `show -j [name]`. */
+	if (argc > 0 && (strcmp(argv[0], "-j") == 0 ||
+	    strcmp(argv[0], "--json") == 0)) {
+		g_json_output = 1;
+		argc--;
+		argv++;
+	}
+
 	/* R5/R4-09: show takes the interface or nothing — surplus
 	 * arguments are an error, not something to ignore. */
 	if (argc > 1)
 		usage();
 	if (argc == 1) {
 		/* R4-09: an explicitly named target reports its ioctl status. */
-		return show_interface(s, argv[0]);
+		rc = show_interface(s, check_ifname(argv[0]));
+		json_finish();
+		return (rc);
 	}
 	/* No name: every awg interface, from the routing socket. */
 	{
@@ -2354,11 +2879,12 @@ cmd_show(int s, int argc, char **argv)
 		freeifaddrs(ifa0);
 	}
 	for (size_t i = 0; i < ncount; i++) {
-		if (i > 0)
-			printf("\n");
+		if (i > 0 && !g_json_output)
+			fputs("\n", stdout);
 		if (show_interface(s, names + i * IFNAMSIZ) != 0)
 			rc = 1;
 	}
+	json_finish();
 	free(names);
 	return (rc);
 }
@@ -2374,11 +2900,16 @@ cmd_set(int s, int argc, char **argv)
 	g_active_cfg = &c;			/* R4-10: wiped on any exit */
 	if (argc < 1)
 		usage();
-	/* R4-09: every key needs a value — a trailing token is an error, not
-	 * something to ignore while the preceding fields apply. */
+	check_ifname(argv[0]);
+	/* R4-09/R1-2: first check for trailing key (odd extra args), then
+	 * require at least one pair — the documented synopsis is
+	 * `set name KEY VALUE ...`. */
 	if ((argc - 1) % 2 != 0)
 		errx(EX_USAGE, "set %s: expected KEY VALUE pairs, one "
 		    "argument left over", argv[0]);
+	if (argc < 3)
+		errx(EX_USAGE, "set %s: at least one KEY VALUE pair is "
+		    "required", argv[0]);
 	/* Seed with the current state so a partial set keeps the siblings
 	 * of every grouped field (Jc/Jmin/Jmax, S1/S2, H1-H4). R5/R4-09:
 	 * a probe failure (ENOTTY on a non-AWG target) is reported with the
@@ -2557,6 +3088,7 @@ cmd_add(int s, int argc, char **argv)
 		usage();
 	if (strcmp(argv[1], "peer") != 0)
 		usage();
+	check_ifname(argv[0]);
 	p = peer_new(&c);
 	p->pc_pubkey = strdup(argv[2]);
 	load_key(p->pc_pubkey, "peer");
@@ -2602,6 +3134,7 @@ cmd_del(int s, int argc, char **argv)
 		usage();
 	if (strcmp(argv[1], "peer") != 0)
 		usage();
+	check_ifname(argv[0]);
 	p = peer_new(&c);
 	p->pc_pubkey = strdup(argv[2]);
 	p->pc_remove = 1;
@@ -2623,7 +3156,9 @@ parse_request(int argc, char **argv, struct request *r)
 		return;
 	if (argc < 3)
 		usage();
-	r->r_ifname = argv[2];
+	/* R1-2: the name is validated before the config path is built and
+	 * walked, so an invalid name cannot touch the filesystem either. */
+	r->r_ifname = check_ifname(argv[2]);
 	if (argc == 3) {
 		char *def;
 

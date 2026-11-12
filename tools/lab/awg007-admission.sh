@@ -7,7 +7,12 @@ set -u
 	exit 1
 }
 cd "$(dirname "$0")" || exit 1
-[ -x ./hsflood ] || cc -O2 -o hsflood hsflood.c || {
+# Build the flood tool in a private temp root, not next to the sources, so
+# concurrent runs do not race on one tools/lab/hsflood binary.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/awg007.XXXXXX") || exit 1
+trap 'rm -rf "$WORK"' EXIT
+HSFLOOD="$WORK/hsflood"
+[ -x "$HSFLOOD" ] || cc -O2 -o "$HSFLOOD" hsflood.c || {
 	echo 'FAIL: cannot build hsflood' >&2
 	exit 1
 }
@@ -41,7 +46,7 @@ fi
 E0=$(netstat -i -I awg6 | tail -1 | awk '{ print $(NF-3) }')
 echo "ierrors before: $E0"
 echo "--- sustained flood: 20000 initiations at ~2000/s ---"
-./hsflood 127.0.0.1 51930 20000 174 500 26 100
+"$HSFLOOD" 127.0.0.1 51930 20000 174 500 26 100
 sleep 1
 E1=$(netstat -i -I awg6 | tail -1 | awk '{ print $(NF-3) }')
 D=$((E1 - E0))

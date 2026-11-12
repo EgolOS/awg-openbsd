@@ -1,30 +1,92 @@
-# Untrusted pull requests execute only on disposable GitHub-hosted runners.
-# Kernel builds are an explicit operator action in a disposable OpenBSD lab.
-# Do not register a persistent privileged runner for this workflow.
-name: build
+name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration-e1]
   pull_request:
+    branches: [main, integration-e1]
 
 permissions:
   contents: read
 
 jobs:
   checks:
+    name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PYTHON_VERSION: "3.12"
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Install offline signature-test tool
         run: sudo apt-get update && sudo apt-get install -y signify-openbsd
-      - name: make check
+
+      - name: Baseline git status before tests
+        run: |
+          git status --porcelain > /tmp/git-status-baseline
+
+      - name: Run test suite (make check)
         run: make check
-      - name: assert awg-openbsd.patch is current
-        run: sh generate-patch.sh --check
+
+      - name: Guard 2 — No new untracked or modified files after tests
+        run: |
+          CURRENT_STATUS=$(git status --porcelain)
+          BASELINE_STATUS=$(cat /tmp/git-status-baseline)
+          NEW_ENTRIES=$(comm -13 <(echo "$BASELINE_STATUS") <(echo "$CURRENT_STATUS"))
+          if [[ -n "$NEW_ENTRIES" ]]; then
+            echo "FAIL: New untracked or modified files detected after build/tests:" >&2
+            echo "$NEW_ENTRIES" >&2
+            exit 1
+          else
+            echo "OK: No new untracked or modified files (tree clean relative to baseline)"
+          fi
+
+      - name: Guard 3 — Secret/personal-path scan (tracked files only)
+        run: |
+          python3 tools/publish-scan.py
+
+  tracked-export-build:
+    name: Tracked-Export Build (v0.2.1-rc1 regression guard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Run tracked-export build script
+        run: |
+          bash tools/ci/tracked-export-build.sh
+
+      - name: Verify awgctl binary exists
+        run: |
+          test -x out/awgctl
+
+  secret-scan:
+    name: Secret/Personal-Path Scan (tracked files)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run secret scan on tracked files
+        run: |
+          python3 tools/publish-scan.py

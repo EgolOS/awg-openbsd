@@ -21,6 +21,7 @@ fail() { echo "FAIL: $*"; FAILED=$((FAILED + 1)); }
 
 # A repo-local work dir: the trust walk starts at "/", so every component of
 # the path is checked and /tmp (1777) would be refused for that reason only.
+# mktemp -d makes it unique per run, so two worktrees never share one scratch.
 WORK=$(cd "$(mktemp -d ./.awgctl-fixture.XXXXXX)" && pwd)
 trap 'rm -rf "$WORK"' EXIT
 CONF="$WORK/conf"
@@ -788,6 +789,55 @@ grep -q 'restore: destroy' "$WORK/out" && grep -q 'left behind' "$WORK/out" &&
 grep -q 'SIOCSAWG' "$WORK/out" &&
 	pass "F13e: the original SIOCSAWG error is preserved" ||
 	fail "F13e: the original error is lost ($(head -2 "$WORK/out"))"
+
+echo
+echo "== F14. G7: an interface name longer than the ioctl field is refused"
+# strlcpy truncated the name to the ioctl name field (IFNAMSIZ bytes,
+# src/if_awg.h:169) silently; the tool
+# must refuse with EX_USAGE (1) and mutate nothing. The config is supplied
+# via --config so the refusal comes from the name check, not from a missing
+# conf file.
+reset_state
+write_conf '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.9.19.1/24\n[Peer]\nPublicKey = ZhAm+vU7+EXMNH+QNv+d1EPlsNVDwz/HTrdlLoU1eFA=\nEndpoint = 10.9.9.9:51820\nAllowedIPs = 0.0.0.0/0\n' # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37,sha1:95479e6583c34c2854c971a69978d7fdd15f10f2,sha1:9c0214d26dcb5755b8a26890d52f74b389cca6ab,sha1:b1d09ad2a5eb5af0b174fe7aa55e7c284b92cda4,sha1:c037e4f7f64622ebbdf02fb2a9c9cdc5cb915c05] synthetic lab key
+"$BIN" up awginterfacewithaveryveryverylongname --config "$CONF/awg9.conf" >"$WORK/out" 2>&1
+rc=$?
+[ "$rc" = 1 ] && pass "F14: a long interface name exits EX_USAGE (rc $rc)" || \
+	fail "F14: a long interface name exited $rc, expected 1"
+grep -q 'interface name longer than' "$WORK/out" && \
+	pass "F14: the truncation is reported" || \
+	fail "F14: the long name is not reported ($(head -1 "$WORK/out"))"
+[ "$(set_count)" = 0 ] && [ ! -s "$IFCLOG" ] && \
+	pass "F14: a refused name mutates nothing" || \
+	fail "F14: a refused name mutated ($(tr '\n' ';' < "$IFCLOG"))"
+# A 15-char name (the .conf stem cap) still works.
+"$BIN" show awg9 >"$WORK/out" 2>&1
+rc=$?
+[ "$rc" = 0 ] && pass "F14: a 4-char name still shows (rc $rc)" || \
+	fail "F14: show awg9 exited $rc"
+
+echo
+echo "== F15. G8: a short-decode key is refused before any mutation"
+# DEFENCE-IN-DEPTH ONLY: on this path load_key() rejects the short decode
+# while PARSING, so serialise_config()'s own b64_pton checks are never
+# reached (they pass on the pre-fix base a1393fc as well). The direct proof
+# for those checks is tools/tests/test_awgctl_buffer_audit.py, which calls
+# serialise_config() itself for every key field. This case keeps the
+# end-to-end refusal covered.
+# A PrivateKey of the right length (44 chars) that b64_pton decodes short
+# must fail with EX_CONFIG (2) before any mutation, not pass a truncated
+# key to the kernel.
+reset_state
+write_conf '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAB==\nAddress = 10.9.19.1/24\n[Peer]\nPublicKey = ZhAm+vU7+EXMNH+QNv+d1EPlsNVDwz/HTrdlLoU1eFA=\nEndpoint = 10.9.9.9:51820\nAllowedIPs = 10.0.0.0/8\n' # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37,sha1:95479e6583c34c2854c971a69978d7fdd15f10f2,sha1:9c0214d26dcb5755b8a26890d52f74b389cca6ab,sha1:b1d09ad2a5eb5af0b174fe7aa55e7c284b92cda4,sha1:c037e4f7f64622ebbdf02fb2a9c9cdc5cb915c05] synthetic lab key
+"$BIN" up awg9 --config "$CONF/awg9.conf" >"$WORK/out" 2>&1
+rc=$?
+[ "$rc" = 2 ] && pass "F15: a short-decode PrivateKey exits EX_CONFIG (rc $rc)" || \
+	fail "F15: a short-decode PrivateKey exited $rc, expected 2"
+grep -q 'PrivateKey (key): invalid base64' "$WORK/out" && \
+	pass "F15: the decode failure names PrivateKey" || \
+	fail "F15: the failure is not attributed ($(head -1 "$WORK/out"))"
+[ "$(set_count)" = 0 ] && [ ! -s "$IFCLOG" ] && \
+	pass "F15: a short decode mutates nothing" || \
+	fail "F15: a short decode mutated ($(tr '\n' ';' < "$IFCLOG"))"
 
 echo
 if [ "$FAILED" -eq 0 ]; then

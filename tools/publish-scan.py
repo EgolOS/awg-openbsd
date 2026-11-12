@@ -302,7 +302,11 @@ def main():
     problems = []
     # -z: git C-quotes non-ASCII names otherwise, and split() then invents
     # paths that do not exist (previously swallowed as OSError).
-    raw = subprocess.run(["git", "ls-files", "-z"], capture_output=True, check=True).stdout
+    # AWG_SOURCE_REPO: scan the real repo's tracked list when invoked from
+    # a `git archive` export (the export has no .git); files exist in both.
+    scan_dir = os.environ.get("AWG_SOURCE_REPO") or None
+    raw = subprocess.run(["git", "ls-files", "-z"], cwd=scan_dir,
+                         capture_output=True, check=True).stdout
     files = [p.decode("utf-8", "surrogateescape") for p in raw.split(b"\0") if p]
     for f in files:
         if os.path.isdir(f):   # e.g. the src/net -> . symlink

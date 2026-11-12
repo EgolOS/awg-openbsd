@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """OpenBSD 8.0 unattended install into a qemu VM (lab only)."""
 import os, sys, subprocess, time, pexpect
+from http_server import start_http_server, stop_http_server
 
 LAB = os.environ.get("LAB", "/lab")
 NAME = os.environ.get("VMNAME", "obsd-a")
@@ -8,10 +9,11 @@ DISK = f"{LAB}/{NAME}.qcow2"
 LOG = f"{LAB}/install-{NAME}.log"
 ISO = f"{LAB}/install80.iso"
 
-# 1. HTTP server for install.conf (guest reaches it at 10.0.2.2:8000)
-http = subprocess.Popen([sys.executable, "-m", "http.server", "8000", "--bind", "0.0.0.0", "--directory", LAB],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1)
+# 1. HTTP server for install.conf (guest reaches it at 10.0.2.2:$PORT).
+# R1 review: the server binds its own socket (kernel-chosen when HTTP_PORT is
+# unset) and reports the port it actually bound, so the port is reserved for
+# the whole install and a busy port is retried with the server's stderr kept.
+http, PORT = start_http_server(LAB, os.environ.get("HTTP_PORT") or None)
 
 if not os.path.exists(DISK):
     subprocess.run(["qemu-img", "create", "-f", "qcow2", DISK, (os.environ.get("DISKSIZE","10G"))], check=True)
@@ -44,7 +46,7 @@ def step(pattern, action, timeout=240, label=""):
 step(r"boot>", "set tty com0\n", 120, "bootloader: set tty com0")
 step(r"boot>", "boot\n", 60, "boot bsd.rd on serial")
 step(r"\(I\)nstall, \(U\)pgrade, \(A\)utoinstall or \(S\)hell", "a\n", 240, "autoinstall")
-step(r"Response file location\?", "http://10.0.2.2:8000/install.conf\n", 120, "response file url")
+step(r"Response file location\?", f"http://10.0.2.2:{PORT}/install.conf\n", 120, "response file url")
 # disk / sets proceed autonomously; wait for the final prompt
 step(r"(CONGRATULATIONS|installation is complete|Press Enter to reboot|reboot)", "\n", 1800, "install finished")
 time.sleep(5)
@@ -53,5 +55,5 @@ try:
 except Exception:
     pass
 child.close(force=True)
-http.terminate()
+stop_http_server(http)
 print("DONE install", NAME, flush=True)

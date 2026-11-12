@@ -2,22 +2,33 @@
 first mutation, so a name that does not resolve leaves nothing created.
 
 The production functions are taken verbatim from sbin/awg-quick (same harness
-as test_quick_up); ifconfig/route/netstat are mocked and getent is the mocked
+as test_quick_up); ifconfig/netstat are mocked and getent is the mocked
 resolver, so the test sees both the resolver call and the mutation order
 without touching a real interface. Nothing is cached: each run resolves its
 own endpoint.
+
+route(8) is a real executable in a private PATH, not a shell function: cmd_up
+ends with `monitor_daemon`, whose `exec route -n monitor` bypasses a function
+and runs the host binary. A function-only fixture therefore inherits the
+blocking monitor (the harness waits for the pipe to close), which is what
+hangs on OpenBSD. The shim answers every verb with the recorded table and
+exits, so the backgrounded monitor has a bounded child lifetime on Linux and
+OpenBSD alike.
 
 (a) unresolvable name      -> non-zero exit, zero create/MTU/address calls
 (b) name of the wrong family against the Address family -> field-specific error
 (c) numeric endpoint       -> no resolver call at all, byte-identical argv
 (d) a name that resolves   -> programmed with the resolved address
 (e) two runs               -> each run resolves its own endpoint
+(f) external route monitor -> blocks (negative control); the shim exits
 """
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import unittest
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,8 +43,8 @@ stat() {
 }
 '''
 
-# Mock ifconfig/route/netstat/getent. Every call is recorded in $CALLS: one
-# marker line (IFC/ROUTE/GETENT) followed by one ARG: line per argument. The
+# Mock ifconfig/netstat/getent. Every call is recorded in $CALLS: one marker
+# line (IFC/ROUTE/GETENT) followed by one ARG: line per argument. The
 # resolver answers with $EP_ADDR (one address) and exits 2 when it is empty,
 # like getent(1) for a name with no answer.
 MOCKS = '''
@@ -53,20 +64,49 @@ ifconfig() {
  return 0
 }
 netstat() { printf 'ROUTE\\n' >> "$CALLS"; return 0; }
-route() {
- printf 'ROUTE\\n' >> "$CALLS"
- printf 'interface: em0\\nmtu: 1500\\n'
- return 0
-}
 '''
+
+# The route(8) stand-in, installed as an executable in a private PATH so that
+# `exec route -n monitor` gets a real program. RECORD records the argv and
+# answers with the em0 table that resolve_mtu and set_endpoint_direct_route
+# parse.
+RECORD = '''printf 'ROUTE\\n' >> "$CALLS"
+for a in "$@"; do printf 'ARG:%s\\n' "$a" >> "$CALLS"; done
+printf 'interface: em0\\nmtu: 1500\\n'
+'''
+
+# Fixed fixture: the monitor verb exits, so the backgrounded subshell reads
+# its events and finishes (bounded child lifetime).
+ROUTE_SHIM = '#!/bin/sh\n' + RECORD
+
+# Negative control: an external monitor that keeps reading, like route(8) on
+# OpenBSD. The run only ends when the harness kills the process group; the
+# sleep bounds the child so the suite cannot outlive it.
+ROUTE_SHIM_EXTERNAL = ('#!/bin/sh\n' + RECORD
+                       + 'case "$*" in\n*monitor*) exec sleep 5 ;;\nesac\n')
+
+ROUTE_SHIMS = {'bounded': ROUTE_SHIM, 'external': ROUTE_SHIM_EXTERNAL}
+
+
+class RunResult(NamedTuple):
+    """Outcome of one `awg-quick up` run; timed_out marks a killed group."""
+    args: list
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
 
 
 class QuickR9EndpointResolution(unittest.TestCase):
-    def run_up(self, text, ep_addr, preexists=False):
+    def run_up(self, text, ep_addr, preexists=False, monitor='bounded',
+               timeout=5.0):
         """Run `awg-quick up` for `text`; the resolver answers with ep_addr.
 
-        Returns (process result, recorded call groups) where each group is
-        (marker, [arguments]).
+        `monitor` selects the route(8) stand-in: 'bounded' (the fixed shim,
+        monitor exits) or 'external' (a blocking monitor, the negative
+        control). Returns (process result, recorded call groups) where each
+        group is (marker, [arguments]); a timed-out run carries
+        ``timed_out=True`` and its whole process group is killed.
         """
         with tempfile.TemporaryDirectory() as d:
             work = Path(d)
@@ -78,15 +118,40 @@ class QuickR9EndpointResolution(unittest.TestCase):
             seen = work / 'seen'
             if preexists:
                 seen.touch()
+            bindir = work / 'bin'
+            bindir.mkdir()
+            route_shim = bindir / 'route'
+            route_shim.write_text(ROUTE_SHIMS[monitor])
+            route_shim.chmod(0o755)
             source = (ROOT / 'sbin/awg-quick').read_text().split('\nif [[ $# -eq 1 &&')[0]
             driver = work / 'driver.bash'
             driver.write_text(source + STAT_ADAPTER + 'parse_options "$1"\n'
                               + MOCKS + 'cmd_up\n')
             env = dict(os.environ, MOCK_OWNER='0', CALLS=str(calls),
-                       SEEN=str(seen), EP_ADDR=ep_addr)
-            r = subprocess.run(['bash', str(driver), str(config)], cwd=work,
-                               env=env, capture_output=True, text=True)
+                       SEEN=str(seen), EP_ADDR=ep_addr,
+                       PATH=str(bindir) + os.pathsep + os.environ.get('PATH', ''))
+            r = self.run_bounded(['bash', str(driver), str(config)], cwd=work,
+                                 env=env, timeout=timeout)
             return r, self.parse_calls(calls.read_text())
+
+    @staticmethod
+    def run_bounded(argv, cwd, env, timeout):
+        """Run argv in its own process group, killing the group on timeout."""
+        proc = subprocess.Popen(argv, cwd=cwd, env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        timed_out = False
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            out, err = proc.communicate()
+        return RunResult(argv, proc.returncode, out, err, timed_out)
 
     @staticmethod
     def parse_calls(log):
@@ -117,7 +182,7 @@ class QuickR9EndpointResolution(unittest.TestCase):
         return [args for marker, args in groups if marker == 'IFC']
 
     def test_a_unresolvable_name_exits_before_any_mutation(self):
-        r, groups = self.run_up('[Interface]\nPrivateKey = dummy\n'
+        r, groups = self.run_up('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                                 'Address = 10.0.0.1/24\nMTU = 1420\n'
                                 '[Peer]\nPublicKey = pub\n'
                                 'Endpoint = awg.example.invalid:51820\n'
@@ -141,7 +206,7 @@ class QuickR9EndpointResolution(unittest.TestCase):
         for label, address, answer, family in cases:
             with self.subTest(case=label):
                 r, groups = self.run_up(
-                    '[Interface]\nPrivateKey = dummy\nAddress = %s\n'
+                    '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = %s\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                     '[Peer]\nPublicKey = pub\nEndpoint = gw.example.invalid:51820\n'
                     'AllowedIPs = 0.0.0.0/0\n' % address, answer)
                 self.assertNotEqual(r.returncode, 0, 'exit must be non-zero')
@@ -160,7 +225,7 @@ class QuickR9EndpointResolution(unittest.TestCase):
         for label, address, aips, endpoint, programmed, family in cases:
             with self.subTest(family=label):
                 r, groups = self.run_up(
-                    '[Interface]\nPrivateKey = dummy\nAddress = %s\nMTU = 1420\n'
+                    '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = %s\nMTU = 1420\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                     '[Peer]\nPublicKey = pub\nEndpoint = %s\n'
                     'AllowedIPs = %s\n' % (address, endpoint, aips), '198.51.100.9')
                 self.assertEqual(r.returncode, 0, r.stderr)
@@ -186,7 +251,7 @@ class QuickR9EndpointResolution(unittest.TestCase):
                 self.assertIn('awgendpoint ' + programmed, self.config_call(groups))
 
     def test_d_resolved_name_is_programmed_with_the_address(self):
-        r, groups = self.run_up('[Interface]\nPrivateKey = dummy\n'
+        r, groups = self.run_up('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                                 'Address = 10.0.0.1/24\nMTU = 1420\n'
                                 '[Peer]\nPublicKey = pub\n'
                                 'Endpoint = gw.example.invalid:51820\n'
@@ -199,7 +264,7 @@ class QuickR9EndpointResolution(unittest.TestCase):
                          'the name is resolved once, by getent')
 
     def test_e_resolution_is_not_cached_between_runs(self):
-        text = ('[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\nMTU = 1420\n'
+        text = ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\nMTU = 1420\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                 '[Peer]\nPublicKey = pub\nEndpoint = gw.example.invalid:51820\n'
                 'AllowedIPs = 0.0.0.0/0\n')
         first, first_groups = self.run_up(text, '203.0.113.42')
@@ -209,6 +274,38 @@ class QuickR9EndpointResolution(unittest.TestCase):
         self.assertIn('awgendpoint 203.0.113.42 51820', self.config_call(first_groups))
         self.assertIn('awgendpoint 198.51.100.7 51820', self.config_call(second_groups),
                       'the second run resolves its own endpoint (no cache)')
+
+    def test_f_external_route_monitor_hangs_and_the_shim_does_not(self):
+        """Negative control: the blocking monitor hangs, the shim finishes.
+
+        Both runs use the same production cmd_up and the same resolved
+        endpoint, so the only difference is the route(8) stand-in. The
+        external monitor (like route(8) on OpenBSD) keeps reading, so the
+        run needs a bounded process-group kill; the shim exits, so the
+        backgrounded monitor finishes.
+        """
+        text = ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\nMTU = 1420\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
+                '[Peer]\nPublicKey = pub\nEndpoint = gw.example.invalid:51820\n'
+                'AllowedIPs = 0.0.0.0/0\n')
+        pre, pre_groups = self.run_up(text, '203.0.113.42', monitor='external',
+                                      timeout=2.0)
+        self.assertTrue(pre.timed_out,
+                        'an external route monitor must block the run')
+        self.assertIn('Backgrounding route monitor', pre.stderr,
+                      'the hang must happen after the monitor is backgrounded')
+        self.assertIn('awgendpoint 203.0.113.42 51820', self.config_call(pre_groups),
+                      'the endpoint is programmed before the monitor blocks')
+        self.assertIn(['awg9', 'up'], self.ifconfig_calls(pre_groups),
+                      'cmd_up reaches up before the monitor blocks')
+        post, post_groups = self.run_up(text, '203.0.113.42', monitor='bounded',
+                                        timeout=2.0)
+        self.assertFalse(post.timed_out, 'the shim monitor exits, so the run ends')
+        self.assertEqual(post.returncode, 0, post.stderr)
+        self.assertIn(['-n', 'monitor'],
+                      [args for m, args in post_groups if m == 'ROUTE'],
+                      'the monitor is the recorded `route -n monitor` call')
+        self.assertIn('awgendpoint 203.0.113.42 51820', self.config_call(post_groups),
+                      'the fixed fixture keeps the same programmed endpoint')
 
 
 if __name__ == '__main__':

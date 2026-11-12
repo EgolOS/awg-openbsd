@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+# Recording install shim (E2-HYGIENE R1-2; R2-1 containment, R3-2 symlink escape fix):
+# like the `install` shim, but it records the effective destination, owner, group and mode as one
+# TSV row (path<TAB>owner<TAB>group<TAB>mode<TAB>type<TAB>staged) to
+# $INSTALL_RECORD so a staged install can be compared against
+# docs/SHIP-LIST.md. BSD install(1) defaults: -o root, -g wheel, mode 555 for
+# plain installs; -d directories take 755 unless -m is given. The mode is
+# applied for real; -s (strip) is a no-op here.
+#
+# R2-1 fixes:
+# - $INSTALL_SANDBOX_ROOT (default "/") maps every destination under an
+#   explicit sandbox root, so hard-coded absolute destinations
+#   (/usr/share/man/man8/ifconfig.8, /usr/include/net, /usr/local/sbin) land
+#   inside the staging tree instead of the host. The recorded path stays the
+#   canonical destination; the staged column carries the real staged path.
+# - The row is recorded only AFTER the copy and the mode application succeed
+#   (a failed copy records nothing, so the suite cannot certify it).
+# - A destination whose mapped path escapes the sandbox root fails closed.
+# - $INSTALL_REC_FAIL=<basename> injects a copy failure for that artefact
+#   (adversarial control proving the recorded rows track real copies).
+#
+# R3-2 fix:
+# - Resolve symlinks in the destination path BEFORE checking containment.
+#   Both the sandbox root and the mapped destination are realpath'd, so
+#   symlink escapes (e.g. sandbox/usr -> ../outside) are detected and rejected.
+import os, shutil, sys
+a = sys.argv[1:]
+d = False
+owner, group, mode = "root", "wheel", "555"
+while a and a[0].startswith("-") and len(a[0]) > 1:
+    if a[0] == "-d":
+        d = True
+        mode = "755"
+        a = a[1:]
+    elif a[0] in ("-m", "-o", "-g", "-u", "-F", "-s"):
+        if a[0] == "-m":
+            mode = a[1]
+        elif a[0] == "-o":
+            owner = a[1]
+        elif a[0] == "-g":
+            group = a[1]
+        # -F (force) and -s (strip) are no-ops for the shim
+        a = a[2:] if a[0] in ("-m", "-o", "-g", "-u") else a[1:]
+    else:
+        a = a[1:]
+if not a:
+    sys.exit(1)
+dst = a[-1]
+src = a[-2] if len(a) >= 2 else None
+if not d and src is None:
+    sys.exit(1)
+
+root = os.environ.get("INSTALL_SANDBOX_ROOT", "/")
+root_real = os.path.realpath(root)
+if os.path.isabs(dst):
+    cand = os.path.normpath(dst)
+    if cand == root_real or cand.startswith(root_real + os.sep):
+        staged = cand
+    else:
+        staged = os.path.normpath(os.path.join(root_real, cand.lstrip("/")))
+else:
+    staged = os.path.normpath(os.path.join(os.getcwd(), dst))
+# R3-2: resolve the staged path to its real location to catch symlink escapes.
+# Both root_real and staged_real are canonical paths; containment is checked
+# on the resolved paths so intermediate symlinks cannot bypass the sandbox.
+staged_real = os.path.realpath(staged)
+# Fail closed: the resolved mapped path must stay under the sandbox root.
+if staged_real != root_real and not staged_real.startswith(root_real + os.sep):
+    sys.stderr.write("install-rec: %s escapes sandbox root %s\n" % (dst, root_real))
+    sys.exit(1)
+
+fail = os.environ.get("INSTALL_REC_FAIL", "")
+if fail and os.path.basename(dst.rstrip("/")) == fail:
+    sys.stderr.write("install-rec: injected copy failure for %s\n" % dst)
+    sys.exit(1)
+
+if d:
+    os.makedirs(staged, exist_ok=True)
+else:
+    parent = os.path.dirname(staged)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    shutil.copy(src, staged)
+os.chmod(staged, int(mode, 8))
+
+with open(os.environ.get("INSTALL_RECORD", "/dev/null"), "a") as f:
+    f.write("%s\t%s\t%s\t%s\t%s\t%s\n"
+            % (dst, owner, group, mode, "dir" if d else "file", staged))

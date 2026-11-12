@@ -71,7 +71,7 @@ class QuickUpOrder(unittest.TestCase):
                     groups.append(args)
             return r, groups
 
-    VALID = ('[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+    VALID = ('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
              'MTU = 1420\n[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
              'AllowedIPs = 0.0.0.0/0\n')
 
@@ -103,7 +103,7 @@ class QuickUpOrder(unittest.TestCase):
 
     def test_invalid_second_address_leaves_interface_and_mtu(self):
         r, groups = self.run_up(
-            '[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24, 10.0.0.1/256\n'
+            '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24, 10.0.0.1/256\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
             '[Peer]\nPublicKey = pub\nAllowedIPs = 0.0.0.0/0\n')
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('invalid prefix', r.stderr)
@@ -111,7 +111,7 @@ class QuickUpOrder(unittest.TestCase):
 
     def test_bad_peer_endpoint_leaves_interface_and_mtu(self):
         r, groups = self.run_up(
-            '[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+            '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
             '[Peer]\nPublicKey = pub\nEndpoint = example.com\nAllowedIPs = 0.0.0.0/0\n')
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('not host:port', r.stderr)
@@ -119,7 +119,7 @@ class QuickUpOrder(unittest.TestCase):
 
     def test_bad_allowed_ip_leaves_interface_and_mtu(self):
         r, groups = self.run_up(
-            '[Interface]\nPrivateKey = dummy\nAddress = 10.0.0.1/24\n'
+            '[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = 10.0.0.1/24\n'  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
             '[Peer]\nPublicKey = pub\nEndpoint = example.com:51820\n'
             'AllowedIPs = 10.0.0.0/256\n')
         self.assertNotEqual(r.returncode, 0)

@@ -97,7 +97,7 @@ sys.exit(rc)
     generic.write_text("#!/bin/sh\nexit 1\n")
     add("adversary-generic-nonzero", env={"AWGCTL_GATE_ADVERSARY": str(generic)}, reason="did not prove an executed MTU-only rejection")
     receipt_only = work / "receipt-only.sh"
-    receipt_only.write_text("#!/bin/sh\nprintf '%s\\n' 'guard-adversary: VERIFIED built; clean=74/0; injected=72/2; cause=mtu; guard=rejected'\nexit 1\n")
+    receipt_only.write_text("#!/bin/sh\nprintf '%s\\n' 'guard-adversary: VERIFIED built; clean=81/0; injected=79/2; cause=mtu; guard=rejected'\nexit 1\n")
     add("adversary-receipt-only", env={"AWGCTL_GATE_ADVERSARY": str(receipt_only)}, reason="did not prove an executed MTU-only rejection")
     failed_cc = work / "adversary-compiler.sh"
     failed_cc.write_text("#!/bin/sh\nCC=false sh " + shlex.quote(str(LAB / "guard-adversary.sh")) + "\n")

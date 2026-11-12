@@ -329,3 +329,39 @@ OpenBSD↔`amneziawg-go`, legacy and 3.1 obfuscation, paired rollback rehearsed.
 Everything outside that list is unverified and must not be advertised. No agent
 in this pass rebooted, reconfigured or deployed anything outside the disposable
 guests.
+
+## 12. E1 integration + E2 wave — 2026-11-10 (current tree state)
+
+`eng/integration-e1` at `a1393fc` is the current integrated tree: the E1
+parents (native fixture `a54fec6`, installer baseline `3777792`, kernel
+baseline `ec16a75`, installer transaction `b4dc032`, source completeness
+`91359bb`) plus the accepted E2 work merged on top of them — kernel junk
+sweep `083e0d9`, VM-lab scripting, upstream delta and CI hardening
+(`b16ab8d`..`a1393fc`, 18 commits: VM-lab, upstream-delta, CI and AWG-041).
+The rest of the E2 wave is accepted by review but not merged into this tree:
+CLI contract (`e2/cli-contract-r2` `ec9469d`), status JSON
+(`e2/status-json-v2` `93ca14c`), wire-format vectors (`e2/vectors-r8`
+`7715bc2`), bounded config fuzz (`e2/config-fuzz-r8` `8452256`), uninstall v3
+(`e2/uninstall-v3` `53d4e2b`), hygiene r5 (`e2/hygiene-r5` `89ec8c9`), trace
+(`e2/trace` `561c441`), the reproducible release archive
+(`e2/repro-final` `c903478`, base `0e557e1`) and the privilege/config-trust
+audit (`e2/userspace-priv-audit` `a17e27f`) with its remediation
+(`eng/e2-priv-remediation` `3017514`) all live on their own branches. The
+integration re-ran `make check` at the integrated pin: rc=0, 138 tests,
+1 skipped (`evidence/e2-docs/e2docs-base-make-check.log`; the E1 integration
+report `reports/E1-CTO-integration.md` records the earlier `0e557e1` run at
+130 tests); `make awgctl` builds rc=0 on this docs tree
+(`evidence/e2-docs/e2docs-r4-make-awgctl.log`).
+
+New evidence this cycle adds host-level coverage of the wire format (r8
+focused suite, 21/21 conformance vectors), the config parsers (5 493 bounded
+fuzz records, 0 crashes), the `awgctl` CLI contract and JSON status mode, the
+`--uninstall` round trip, build-artifact/ship-list hygiene, and a reproducible
+release archive — all
+executed on the Linux host against fixtures, not against a native kernel.
+The native gates that decide what the release may claim — kernel
+build/install/boot and ioctl ABI for the final pin, the four `check-vm`
+negative gates, legacy + 3.1 interop, and the 1-vCPU performance baseline —
+remain NOT TESTED for this tree; the native install card is blocked behind
+the VM-lab chain. The release notes' limitations table is the authoritative
+list; this section does not add capability claims beyond it.

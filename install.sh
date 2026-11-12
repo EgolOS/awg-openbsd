@@ -10,7 +10,7 @@
 set -e
 
 SCRIPT=$(readlink -f "$0")
-REPODIR=$(dirname "$SCRIPT")
+REPODIR=${REPODIR:-$(dirname "$SCRIPT")}
 SRCDIR=${SRCDIR:-/usr/src/sys}
 IFCFG_SRC=${IFCFG_SRC:-/usr/src/sbin/ifconfig}
 CDN=https://cdn.openbsd.org/pub/OpenBSD
@@ -22,6 +22,10 @@ BUILD_USER=""
 ALLOW_ROOT_BUILD=no
 INSTALL_DB=${INSTALL_DB:-/var/db/awg-install}
 MANIFEST=$INSTALL_DB/manifest
+# AWG-014 R1 (D-2): the fsync helper is compiled once into the root-owned
+# install DB, not into the builder-writable $WORK, so a builder-planted
+# executable cannot be the binary root executes.
+FSYNC_HELPER=${AWG_FSYNC_HELPER:-$INSTALL_DB/awg-fsync}
 # R4-01: one exclusive lock serialises every run against the shared paths
 # (/bsd, /sbin/ifconfig, the backup pair). Overridable for tests.
 LOCKFILE=${AWG_LOCK_FILE:-$INSTALL_DB/lock}
@@ -53,17 +57,32 @@ AWG_CONF_DIR=${AWG_CONF_DIR:-/etc/amnezia/amneziawg}
 # R4-14 (R6): the awgctl manpage ships with the binary; the target is
 # overridable for the sandboxed test suite.
 AWGCTL_MAN_DIR=${AWGCTL_MAN_DIR:-/usr/share/man/man8}
+# Overridable paths for uninstall artifact restoration (test fixtures)
+OBSD_FILE=${OBSD_FILE:-/obsd}
+PF_CONF_FILE=${PF_CONF_FILE:-/etc/pf.conf}
+# F9: kernel relink (KARL) objects. reorder_kernel(8) relinks the kernel of the
+# ident in kern.osversion from this directory; the ident is AWG.MP because that
+# is the config this installer builds and publishes.
+RELINK_KERNEL_DIR=${RELINK_KERNEL_DIR:-/usr/share/relink/kernel}
+KERNEL_IDENT=${KERNEL_IDENT:-AWG.MP}
+RELINK_SKIP=no
+RELINK_STATE=unknown
+RELINK_BACKUP=""
 ROLLBACK_KERNEL_ONLY=no
 BACKUP_PAIR_DONE=no
 GENERATION=0
-BACKUP_GEN=0
+BACKUP_GEN=""
 PUBLISH_STARTED=no
+# F9: how far publish_relink_objects got in this process (none|swapped|rolled).
+# The interrupted-publish restore reads this instead of the manifest, which at
+# that point still carries the previous generation's keys.
+RELINK_PUBLISH_STATE=none
 
 # Nothing here may live at a predictable /tmp path: this script runs as root
 # and an unprivileged user can pre-create a symlink at a fixed name. The work
 # directory holds the release tarballs (~300 MB), so prefer /usr/src when it
 # exists: on a VPS / is small and /tmp lives on it.
-LOGFILE=$(mktemp /tmp/awg-install-log.XXXXXX) || { echo "mktemp failed" >&2; exit 1; }
+LOGFILE=$(mktemp "${TMPDIR:-/tmp}/awg-install-log.XXXXXX") || { echo "mktemp failed" >&2; exit 1; }
 chmod 600 "$LOGFILE"
 if [ -d /usr/src ] && [ -w /usr/src ]; then
     WORK=$(mktemp -d /usr/src/.awg-install.XXXXXX) || exit 1
@@ -284,22 +303,50 @@ release_lock() {
     LOCK_OWNED=no
 }
 
-verify_lock_held() {
-    [ "$LOCK_OWNED" = yes ] || { echo 'lock not held' >&2; return 1; }
-    [ "$(read_lock_owner "$LOCK_SLOT")" = "$LOCK_TOKEN" ] \
-        && [ ! -e "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \
-        && [ ! -L "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \
-        || { echo 'lock replaced by another run' >&2; return 1; }
+
+# F8: with KARL, /etc/rc runs /usr/libexec/reorder_kernel at every boot and
+# that script relinks /bsd from the objects in /usr/share/relink/kernel and
+# rewrites /var/db/kernel.SHA256 for the kernel it just installed. After a
+# relink the manifest's installed_bsd_sha256 (the *staged* artifact) can never
+# match /bsd again, so a check that only compared the manifest reported a
+# healthy host as broken. The integrity DB is the authority the system itself
+# trusts: when it records a hash for /bsd and /bsd hashes to it, the installed
+# kernel is verified — the manifest difference is the expected relink.
+kernel_db_sha() {   # print the sha256 recorded for $BSD_FILE, or nothing
+    [ -n "$KERNEL_SHA256" ] && [ -f "$KERNEL_SHA256" ] || return 0
+    awk -v f="$BSD_FILE" '$1 == "SHA256" && $2 == "(" f ")" { print $NF; exit }' \
+        "$KERNEL_SHA256" 2>/dev/null
 }
 
-# R4-01: before exiting, /bsd must be a non-empty regular file whose sha256
-# and size match what the manifest recorded for the installed kernel.
+# R4-01 + F8: before exiting, /bsd must be a non-empty regular file whose
+# integrity is verifiable. Two authorities are accepted, in this order:
+#   1. /var/db/kernel.SHA256 — the kernel integrity DB the boot-time relink
+#      also rewrites. A recorded hash that matches /bsd is proof; a recorded
+#      hash that does not is corruption and fails closed.
+#   2. the manifest's installed_bsd_sha256 — the staged artifact, which is
+#      still what /bsd holds before the first reboot.
+# A DB that exists but has no SHA256 (/bsd) line is not ignorable: the host
+# cannot prove what it boots, so the run fails rather than guessing.
 verify_bsd_final() {
-    local want size got
+    local want size got db
     [ -f "$BSD_FILE" ] || { echo "WARNING: $BSD_FILE is not a regular file" >&2; return 1; }
     size=$(stat -f %z "$BSD_FILE" 2>/dev/null) \
         || { echo "WARNING: cannot stat $BSD_FILE" >&2; return 1; }
     [ "$size" -gt 0 ] || { echo "WARNING: $BSD_FILE is 0 bytes" >&2; return 1; }
+    db=$(kernel_db_sha)
+    if [ -n "$db" ]; then
+        got=$(sha256 -q "$BSD_FILE" 2>/dev/null) \
+            || { echo "WARNING: cannot hash $BSD_FILE" >&2; return 1; }
+        if [ "$got" != "$db" ]; then
+            echo "WARNING: $BSD_FILE sha256 $got does not match $KERNEL_SHA256 ($db) — the installed kernel is corrupt or was replaced" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if [ -n "$KERNEL_SHA256" ] && [ -f "$KERNEL_SHA256" ]; then
+        echo "WARNING: $KERNEL_SHA256 records no SHA256 ($BSD_FILE) entry — cannot verify the installed kernel" >&2
+        return 1
+    fi
     [ -f "$MANIFEST" ] || return 0
     want=$(manifest_get "$MANIFEST" installed_bsd_sha256)
     [ -n "$want" ] || return 0
@@ -372,6 +419,28 @@ check_tree_trust() {
     [ "$verdict" = trusted ] || die "untrusted source tree: $verdict — $2"
 }
 
+# F3/F4: the extraction parent does not exist on a first install, so tree_trust
+# cannot stat it. Walk up to the nearest existing ancestor and require *that*
+# chain to be trusted before root creates directories or extracts an archive
+# there. A /usr/src symlink is followed (tree_trust resolves with readlink -f),
+# so a link planted by another account cannot redirect root's extraction into a
+# directory this check has not approved.
+tree_trust_pending() {   # tree_trust_pending <path that may not exist yet>
+    local p=$1
+    while [ ! -e "$p" ]; do
+        [ "$p" = / ] && break
+        p=$(dirname "$p")
+    done
+    tree_trust "$p"
+}
+
+check_pending_trust() {   # check_pending_trust <path> <why>
+    local verdict
+    verdict=$(tree_trust_pending "$1")
+    [ "$verdict" = trusted ] \
+        || die "untrusted path $1: $verdict — $2 (use a directory owned by $AWG_BUILD_USER or by root and not group/other writable)"
+}
+
 # Hand the staged tree to the builder so config/make can write their objects.
 hand_tree_to_builder() {
     local dir=$1
@@ -411,6 +480,66 @@ builder_make() {   # builder_make <workdir> [make args...]
     builder_run "$dir" "make$cmd"
 }
 
+# Can the account that compiles write into <dir>? Asked as that account, so a
+# directory root can write but the builder cannot (stock /usr/obj) is visible.
+builder_can_write() {   # builder_can_write <existing dir>
+    local dir=$1
+    resolve_build_user
+    [ -d "$dir" ] || return 1
+    builder_run "$dir" "test -w ." >/dev/null 2>&1
+}
+
+# F2: stock OpenBSD 8.0 ships /usr/obj as build:wobj 0770, so the documented
+# builder account (`useradd -s /sbin/nologin _awgbuild`) cannot create the
+# object directory `config AWG.MP` derives from the stock source path:
+#   mkdir: /usr/obj/sys: Permission denied     (config rc 2, before any compile)
+# Pre-creating /usr/obj/sys is not enough on its own: a builder that is not in
+# the group that owns /usr/obj cannot even traverse the root, so the subtree
+# stays unreachable. Two native remedies, in order, neither of which widens a
+# mode or touches the shared root:
+#   1. add the account to the group that already owns the object root (that is
+#      what `wobj` exists for — `usermod -G wobj <account>`);
+#   2. if the root is traversable but not writable, pre-create only the subtree
+#      config needs and hand that subtree to the builder.
+# When the source root is redirected outside /usr/src, config(8) keeps its
+# objects in-tree, and the tree has already been handed to the builder — both
+# layouts are covered, and kernel_objdir() later finds whichever one was used.
+prepare_objdir() {
+    local root group bgroup
+    resolve_build_user
+    if [ "$BUILD_USER" = root ]; then
+        log "Building as root — object directory ownership is not enforced"
+        return 0
+    fi
+    root=${BSDOBJDIR:-/usr/obj}
+    if builder_can_write "$root"; then
+        log "Object directory $root is writable by $BUILD_USER"
+        return 0
+    fi
+    log "note: $root is not writable by $BUILD_USER (stock 8.0 is build:wobj 0770)"
+    group=$(stat -f %Sg "$root" 2>/dev/null)
+    bgroup=$(id -gn "$BUILD_USER" 2>/dev/null)
+    if [ -n "$group" ] && [ "$group" != "$bgroup" ]; then
+        log "Adding $BUILD_USER to group $group (the group that owns $root)"
+        usermod -G "$group" "$BUILD_USER" \
+            || log "warning: usermod -G $group $BUILD_USER failed"
+        if builder_can_write "$root"; then
+            log "$root is writable by $BUILD_USER now (group $group; mode unchanged)"
+            return 0
+        fi
+    fi
+    mkdir -p "$root/sys/arch/amd64/compile" \
+        || die "cannot create $root/sys/arch/amd64/compile"
+    chown -R "$BUILD_USER" "$root/sys" \
+        || die "cannot hand $root/sys to $BUILD_USER"
+    builder_can_write "$root/sys/arch/amd64/compile" \
+        || die "$root/sys/arch/amd64/compile is still not writable by $BUILD_USER — set BSDOBJDIR to a directory that account owns, or add it to group $group"
+    log "Created $root/sys/arch/amd64/compile for $BUILD_USER (mode of $root unchanged)"
+    # Objects and the KARL relink set are large; a full /usr turns a build into
+    # an out-of-space failure hours in. Report it before compiling (F10).
+    log "Free space on $(df -h "$root" | awk 'NR==2 {print $6}') : $(df -h "$root" | awk 'NR==2 {print $4}') (kernel objects need ~1 GB, relink objects another ~700 MB)"
+}
+
 # Verify a downloaded release file against the release's signed SHA256 list.
 # signify(1) and /etc/signify are part of a stock OpenBSD install, so a file
 # that cannot be verified must stop the install, not warn.
@@ -445,19 +574,41 @@ install_packages() {
 fetch_sys_sources() {
     step "Kernel sources"
 
+    # F3/F4: the extraction target is written by root, and a supported
+    # SRCDIR override may point at a tree that does not exist yet. Three
+    # hazards the old code had:
+    #   * `mkdir -p /usr/src` under set -e aborted the whole run when the
+    #     operator's /usr/src is a symlink ("mkdir: /usr/src: File exists");
+    #   * `tar -C "$(dirname "$SRCDIR")"` failed with "Failed chdir" when the
+    #     redirected parent did not exist;
+    #   * neither checked who owns the target first, so root could be made to
+    #     extract a verified archive through a link another account planted.
+    local parent
+    parent=$(dirname "$SRCDIR")
+
     # Validate sources (files.rasops being empty is a known bad-extraction symptom)
     if [ ! -f "$SRCDIR/net/if_wg.c" ] || ! grep -q 'OpenBSD' "$SRCDIR/dev/rasops/files.rasops" 2>/dev/null; then
         local ver url
         ver=$(uname -r)
         url="$CDN/${ver}/sys.tar.gz"
+        # Trust before write: the nearest existing ancestor of the parent must
+        # be owned by root or the builder and not group/other writable. A
+        # symlinked /usr/src is followed to its real target and checked there.
+        check_pending_trust "$parent" "the verified sys.tar.gz is extracted here as root"
+        if [ -L "$parent" ]; then
+            log "note: $parent is a symlink to $(readlink -f "$parent") — extracting through it"
+        fi
+        if [ ! -d "$parent" ]; then
+            log "Creating source parent $parent"
+            mkdir -p "$parent" || die "cannot create $parent"
+        fi
         log "Fetching kernel sources from $url"
-        mkdir -p /usr/src
         ftp -o "$WORK/sys.tar.gz" "$url" \
-            || die "Failed to download $url — CDN only carries 7.7+. Download manually and extract to /usr/src"
+            || die "Failed to download $url — CDN only carries 7.7+. Download manually and extract to $parent"
         verify_release_file sys.tar.gz
-        tar -C "$(dirname "$SRCDIR")" -xzf "$WORK/sys.tar.gz" || die "Failed to extract sys.tar.gz"
+        tar -C "$parent" -xzf "$WORK/sys.tar.gz" || die "Failed to extract sys.tar.gz into $parent"
         [ -f "$SRCDIR/net/if_wg.c" ] || die "sys.tar.gz extracted but $SRCDIR/net/if_wg.c not found"
-        log "Kernel sources installed to /usr/src/sys"
+        log "Kernel sources installed to $SRCDIR"
     else
         log "Kernel sources already present"
     fi
@@ -553,9 +704,11 @@ ifconfig_build() {
     builder_make "$IFCFG_SRC" "CPPFLAGS=-I$STAGE_DIR" || die "ifconfig build failed"
     # The binary lands in the object directory `make` chose for that tree, which
     # is not the caller's cwd now that the build runs in a subshell. Ask make
-    # from inside the source directory instead of assuming ./obj.
+    # from inside the source directory through the builder (AWG-014 R1 D-1:
+    # `make -V` parses the makefile, so it must not run as root) instead of
+    # assuming ./obj.
     local objdir
-    objdir=$(cd "$IFCFG_SRC" && make -V .OBJDIR) || die "cannot resolve the ifconfig object directory"
+    objdir=$(builder_run "$IFCFG_SRC" "make -V .OBJDIR") || die "cannot resolve the ifconfig object directory"
     [ -x "$objdir/ifconfig" ] || die "ifconfig build produced no binary in $objdir"
     IFCFG_ARTIFACT="$objdir/ifconfig"
     log "ifconfig built: $IFCFG_ARTIFACT"
@@ -736,6 +889,9 @@ kernel_build() {
     check_tree_trust "$SRCDIR" "the kernel build writes its objects here"
     hand_tree_to_builder "$SRCDIR"
 
+    # F2: config's object directory must be writable by that account.
+    prepare_objdir
+
     log "Configuring AWG.MP"
     builder_run "$SRCDIR/arch/amd64/conf" "config AWG.MP"
 
@@ -747,6 +903,7 @@ kernel_build() {
         tail -20 "$LOGFILE" >&2
         die "kernel build failed (full log: $LOGFILE)"
     fi
+    log "Kernel objects: $(kernel_objdir || echo 'not found')"
 }
 
 # Refuse a compiled kernel that cannot be the AWG kernel: wrong file type, a
@@ -766,10 +923,35 @@ verify_kernel_artifact() {		# verify_kernel_artifact <path>
     log "Verified $k ($size bytes, awg symbols present)"
 }
 
-# config(8) puts the objects (and the linked bsd) under obj/; `make install`
-# finds them there, but a script that copies the artifact must not assume it.
+# config(8) puts the objects (and the linked bsd) under an object directory,
+# and the location depends on the source root: with the stock /usr/src it uses
+# $BSDOBJDIR/sys/arch/amd64/compile/AWG.MP, with a redirected SRCDIR it keeps
+# the objects in-tree (<SRCDIR>/arch/amd64/compile/AWG.MP/obj, either a real
+# directory or the obj symlink config leaves behind). F2: the old fixed
+# in-tree path only worked for the redirected case and would have "verified" a
+# missing kernel on a stock install, so the object directory is discovered.
+kernel_objdir_candidates() {
+    printf '%s\n' \
+        "$SRCDIR/arch/amd64/compile/AWG.MP/obj" \
+        "$SRCDIR/arch/amd64/compile/AWG.MP" \
+        "${BSDOBJDIR:-/usr/obj}/sys/arch/amd64/compile/AWG.MP" \
+        "${BSDOBJDIR:-/usr/obj}/sys/arch/amd64/compile/AWG.MP/obj"
+}
+
+# The object directory the build actually used: the first candidate holding a
+# linked kernel.
+kernel_objdir() {
+    local d
+    for d in $(kernel_objdir_candidates); do
+        [ -f "$d/bsd" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
+}
+
 kernel_object_path() {
-    echo "$SRCDIR/arch/amd64/compile/AWG.MP/obj/bsd"
+    local d
+    d=$(kernel_objdir) || d=$(kernel_objdir_candidates | head -1)
+    echo "$d/bsd"
 }
 
 build_kernel_only() {
@@ -807,6 +989,281 @@ kernel_publish() {
     log "If it does not boot: at the boot prompt, 'boot /bsd.awg-prev.$BACKUP_GEN'; after boot, sh $0 --rollback"
     return 0
 }
+
+# ── KARL relink objects (F9) ─────────────────────────────────────────────────
+# /etc/rc runs /usr/libexec/reorder_kernel at boot; that script cd's into
+# $RELINK_KERNEL_DIR/<ident> (ident read from kern.osversion) and drives the
+# compile Makefile's newbsd / reconfig / newinstall targets. A stock GENERIC.MP dir ships a compile
+# Makefile, makegap.sh, ld.script and the object files; `make install` of a
+# *custom* kernel does not create that directory, so relink fails on every boot
+# ("make: don't know how to make newbsd") and /bsd is never relinked. Publishing
+# the objects is what `make update-link` in the compile directory does:
+#   tar -chf - Makefile makegap.sh ld.script *.o | tar -C .../AWG.MP -xf -
+# It is reimplemented here instead of invoking that target because update-link
+# starts with `rm -rf /usr/share/relink/kernel/AWG.MP`: it destroys the previous
+# set before it knows the new one is complete, which is exactly what a paired
+# rollback needs to keep. This publishes by staging, verifying and renaming.
+
+# Where the objects for this ident live, and how big the set is.
+relink_dir() {
+    printf '%s' "${RELINK_KERNEL_DIR:-/usr/share/relink/kernel}/${KERNEL_IDENT:-AWG.MP}"
+}
+
+relink_object_count() {
+    local t
+    t=$(relink_dir)
+    [ -d "$t" ] || { echo 0; return 0; }
+    ls "$t"/*.o 2>/dev/null | wc -l | tr -d ' '
+}
+
+relink_state_now() {
+    local t
+    t=$(relink_dir)
+    [ -d "$t" ] || { echo missing; return 0; }
+    [ "$(relink_object_count)" -gt 0 ] && { echo present; return 0; }
+    echo missing
+}
+
+relink_object_kb() {   # size of the object set that would be published
+    local o
+    o=$(kernel_objdir) || return 1
+    du -ck "$o"/*.o 2>/dev/null | awk 'END { print $1 }'
+}
+
+# Journal the relink transition in the manifest. Recovery reads these keys, so
+# they are written *before* the directory is touched: an interruption between
+# the two renames then lands in a state the restore can undo ("pending" with no
+# backup on disk means the live directory is still the previous set).
+manifest_set_relink() {   # manifest_set_relink <state> <backup-path> <objects>
+    local kv
+    [ -f "$MANIFEST" ] || return 0
+    kv="$WORK/relink.kv"
+    {
+        printf 'relink_state=%s\n' "$1"
+        printf 'relink_backup_path=%s\n' "$2"
+        printf 'relink_objects=%s\n' "$3"
+        printf 'relink_path=%s\n' "$(relink_dir)"
+    } > "$kv" || { echo "cannot write $kv" >&2; return 1; }
+    manifest_apply_kv "$kv" >> "$LOGFILE" 2>&1 \
+        || { echo "cannot journal the relink state in $MANIFEST" >&2; return 1; }
+    return 0
+}
+
+# Publish this build's relink objects for $KERNEL_IDENT. Transactional: the new
+# set is complete and verified in a staging directory on the same filesystem,
+# the previous set is kept by rename (so a rollback can put it back), and only
+# then does the new set take its place.
+publish_relink_objects() {
+    local objdir target stage prev need avail have staged
+
+    step "KARL relink objects ($KERNEL_IDENT)"
+
+    if [ "$RELINK_SKIP" = yes ]; then
+        log "WARNING: --skip-relink-objects: $KERNEL_IDENT will not be relinked at boot"
+        log "WARNING: the console will print 'reorder_kernel: failed' until 'make update-link' is run in the kernel object directory"
+        RELINK_STATE=skipped
+        return 0
+    fi
+
+    objdir=$(kernel_objdir) || {
+        echo "cannot find the kernel object directory — the relink objects of this kernel cannot be published" >&2
+        return 1
+    }
+    target=$(relink_dir)
+    [ -f "$objdir/Makefile" ] \
+        || { echo "$objdir has no compile Makefile — not a kernel object directory" >&2; return 1; }
+    [ -f "$objdir/makegap.sh" ] \
+        || { echo "$objdir has no makegap.sh — the relink needs it" >&2; return 1; }
+    [ -f "$objdir/ld.script" ] \
+        || { echo "$objdir has no ld.script — the relink needs it" >&2; return 1; }
+    have=$(ls "$objdir"/*.o 2>/dev/null | wc -l | tr -d ' ')
+    [ "$have" -gt 0 ] || { echo "no object files in $objdir" >&2; return 1; }
+
+    # F10: the relink set is roughly the size of the object directory and it
+    # lives under /usr, which is where a small install runs out of space. Say so
+    # with numbers before copying ~700 MB.
+    need=$(relink_object_kb) || need=0
+    mkdir -p -m 700 "$RELINK_KERNEL_DIR" \
+        || { echo "cannot create $RELINK_KERNEL_DIR" >&2; return 1; }
+    avail=$(df -k "$RELINK_KERNEL_DIR" 2>/dev/null | awk 'NR==2 { print $4 }')
+    if [ -n "$avail" ] && [ "$need" -gt 0 ] && [ "$avail" -lt $((need + 102400)) ]; then
+        echo "not enough space on $RELINK_KERNEL_DIR for the relink objects: need $((need / 1024 + 100)) MB, ${avail} KB free" >&2
+        echo "free space on that filesystem, or rerun with --skip-relink-objects to publish the kernel without boot-time relink" >&2
+        return 1
+    fi
+
+    stage="$RELINK_KERNEL_DIR/.awg-stage.$$"
+    rm -rf "$stage"
+    mkdir -m 700 "$stage" || { echo "cannot create $stage" >&2; return 1; }
+    # Copy the same set `make update-link` copies, preserving mode and times so
+    # the objects keep their identity.
+    for f in Makefile makegap.sh ld.script; do
+        cp -p "$objdir/$f" "$stage/$f" || {
+            rm -rf "$stage"
+            echo "could not copy $objdir/$f to $stage" >&2
+            return 1
+        }
+    done
+    for f in "$objdir"/*.o; do
+        cp -p "$f" "$stage/" || {
+            rm -rf "$stage"
+            echo "could not copy $f to $stage" >&2
+            return 1
+        }
+    done
+    # Verify the staged set before it becomes the boot-time input: the script
+    # needs the newbsd target, and every object of the build must be there.
+    if ! grep -q '^newbsd:' "$stage/Makefile"; then
+        rm -rf "$stage"
+        echo "$objdir/Makefile has no newbsd target — it is not a relink Makefile" >&2
+        return 1
+    fi
+    staged=$(ls "$stage"/*.o 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$staged" != "$have" ]; then
+        rm -rf "$stage"
+        echo "staged $staged objects but the build has $have — refusing to publish an incomplete relink set" >&2
+        return 1
+    fi
+
+    prev="$target.awg-prev.$GENERATION"
+    RELINK_BACKUP=""
+    # Journal first: if the run dies between these renames, the restore knows
+    # which set was live and where the backup was being kept.
+    manifest_set_relink pending "$prev" "$staged" || { rm -rf "$stage"; return 1; }
+    if [ -d "$target" ]; then
+        rm -rf "$prev"
+        if ! mv "$target" "$prev"; then
+            rm -rf "$stage"
+            echo "cannot move $target aside to publish new relink objects" >&2
+            return 1
+        fi
+        RELINK_BACKUP=$prev
+    fi
+    # From here the live set is the *new* one until the pair commits, so an
+    # interrupted publish has to put RELINK_BACKUP back (F9).
+    RELINK_PUBLISH_STATE=swapped
+    if ! mv "$stage" "$target"; then
+        RELINK_PUBLISH_STATE=rolled
+        [ -n "$RELINK_BACKUP" ] && mv "$RELINK_BACKUP" "$target"
+        rm -rf "$stage"
+        echo "cannot install the relink objects to $target" >&2
+        return 1
+    fi
+    RELINK_STATE=present
+    manifest_set_relink present "$RELINK_BACKUP" "$staged" || return 1
+    log "Published relink objects for $KERNEL_IDENT: $target ($staged objects, $(du -sh "$target" 2>/dev/null | awk '{ print $1 }'))"
+    [ -n "$RELINK_BACKUP" ] && log "Previous relink objects kept at $RELINK_BACKUP (removed once the next generation commits)"
+    log "Boot-time reorder_kernel now has the Makefile and objects it needs — /bsd will be relinked on the next boot"
+    return 0
+}
+
+# Move <backup> into <target>'s place, keeping the current set aside only until
+# the rename succeeds.
+relink_restore_backup() {   # relink_restore_backup <target> <backup>
+    local target=$1 backup=$2 discard
+    discard="$target.awg-discard.$$"
+    rm -rf "$discard"
+    if [ -d "$target" ] && ! mv "$target" "$discard"; then
+        echo "cannot move $target aside to restore $backup" >&2
+        return 1
+    fi
+    if mv "$backup" "$target"; then
+        rm -rf "$discard"
+        return 0
+    fi
+    [ -d "$discard" ] && mv "$discard" "$target"
+    echo "could not restore $backup to $target" >&2
+    return 1
+}
+
+# Put the relink objects back in step with the kernel a rollback just restored.
+# Leaving the *new* set in place would make the next boot relink a kernel the
+# operator rolled away from, which is worse than no relink at all.
+# Two callers, two sources of truth:
+#   interrupt — this process is aborting mid-publish, so the only reliable
+#               record of what it did is RELINK_PUBLISH_STATE/RELINK_BACKUP;
+#               the manifest at that moment still carries the *previous*
+#               generation's keys, and acting on those deleted a live set.
+#   committed — an operator --rollback of a generation that fully committed;
+#               the manifest is authoritative there.
+restore_relink_generation() {   # restore_relink_generation [interrupt|committed]
+    local target state backup mode=${1:-committed}
+    target=$(relink_dir)
+    if [ "$mode" = interrupt ]; then
+        case "${RELINK_PUBLISH_STATE:-none}" in
+        none)
+            log "Relink objects were not touched by this run: $target still holds the previous objects"
+            return 0
+            ;;
+        rolled)
+            log "Relink publish rolled back in place: $target holds the previous objects"
+            return 0
+            ;;
+        swapped)
+            if [ -n "${RELINK_BACKUP:-}" ] && [ -d "$RELINK_BACKUP" ]; then
+                relink_restore_backup "$target" "$RELINK_BACKUP" || return 1
+                log "Restored the relink objects of the previous kernel: $target"
+            else
+                echo "WARNING: this run published new relink objects in $target and kept no copy of the previous set —" >&2
+                echo "WARNING: removing $target so the boot relink cannot relink objects that do not match the restored kernel" >&2
+                [ -d "$target" ] && rm -rf "$target"
+            fi
+            RELINK_PUBLISH_STATE=rolled
+            RELINK_BACKUP=""
+            return 0
+            ;;
+        esac
+    fi
+    state=$(manifest_get "$MANIFEST" relink_state)
+    backup=$(manifest_get "$MANIFEST" relink_backup_path)
+    [ -n "$state" ] || state=unknown
+    case "$state" in
+    present|pending)
+        if [ -n "$backup" ] && [ -d "$backup" ]; then
+            relink_restore_backup "$target" "$backup" || return 1
+            log "Restored the relink objects of the previous kernel: $target"
+        elif [ "$state" = pending ]; then
+            # The publish was interrupted before it moved the old set aside, so
+            # the live directory is still the previous kernel's objects.
+            log "Relink publish was interrupted before the swap: $target still holds the previous objects"
+        else
+            echo "WARNING: generation $BACKUP_GEN recorded relink objects but $backup is missing —" >&2
+            echo "WARNING: removing $target so the boot relink cannot relink objects that do not match the restored kernel" >&2
+            [ -d "$target" ] && rm -rf "$target"
+        fi
+        ;;
+    missing|skipped)
+        # The generation being restored had no relink objects (first install, or
+        # --skip-relink-objects): leave none behind rather than stale ones.
+        if [ -d "$target" ]; then
+            rm -rf "$target"
+            log "Removed $target: the restored generation had no installed relink objects"
+        fi
+        ;;
+    *)
+        # No relink record at all: the publish died before it journaled
+        # anything, so this directory is still whatever the previous state was.
+        # Touching it would destroy the only copy of a working relink set.
+        log "No relink record in $MANIFEST: leaving $target as it is"
+        ;;
+    esac
+    RELINK_BACKUP=""
+    return 0
+}
+
+# Only the newest relink backup can be restored by --rollback; older ones cost
+# ~700 MB each and are dropped with the older backup generations.
+prune_relink_backups() {
+    local target g f
+    target=$(relink_dir)
+    for f in "$target".awg-prev.*; do
+        [ -e "$f" ] || continue
+        g=${f##*.awg-prev.}
+        case "$g" in ''|*[!0-9]*) continue ;; esac
+        [ "$g" -lt "$BACKUP_GEN" ] && rm -rf "$f" 2>/dev/null
+    done
+}
+
 
 # Release that produced this tree: git tag/commit, else the operator-provided
 # AWG_RELEASE_TAG, else "unknown". Recorded so a rollback can be attributed.
@@ -861,14 +1318,46 @@ backup_member() {   # backup_member <source> <destination>
     return 0
 }
 
+# Merge a key=value file into the manifest: keys the file carries replace the
+# existing line in place, missing keys are appended, every other line is kept.
+# (The manifest is the only record of what is installed, so a write that only
+# knows about backups must not drop the installed_* keys — that is F5.)
+manifest_apply_kv() {   # manifest_apply_kv <kvfile>
+    local kvf=$1 tmp
+    tmp="${MANIFEST}.new.$$"
+    awk -v kvf="$kvf" '
+        BEGIN {
+            while ((getline line < kvf) > 0) {
+                k = line; sub(/=.*/, "", k)
+                if (!(k in seen)) { seen[k] = 1; order[++n] = k }
+                val[k] = substr(line, index(line, "=") + 1)
+            }
+        }
+        {
+            k = $0; sub(/=.*/, "", k)
+            if (k in seen) { print k "=" val[k]; delete seen[k]; next }
+            print
+        }
+        END {
+            for (i = 1; i <= n; i++) { k = order[i]; if (k in seen) print k "=" val[k] }
+        }
+    ' "$MANIFEST" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$MANIFEST"
+}
+
 write_backup_pair() {
-    local bsd_sha ifc_sha hdr_sha ctl_sha ksha_sha bsd_size ifc_size tmp
+    local bsd_sha ifc_sha hdr_sha ctl_sha ksha_sha bsd_size ifc_size tmp kv
 
     if [ "$BACKUP_PAIR_DONE" = yes ]; then
         log "Backup pair already taken this run — keeping it"
         return 0
     fi
     BACKUP_PAIR_DONE=yes
+
+    # Record pre-install inventory on the very first install (no manifest yet).
+    # This captures the state of non-pair artifacts before any AWG changes.
+    [ -f "$MANIFEST" ] || record_preinstall_inventory
+
     GENERATION=$(next_generation)
     BACKUP_GEN=$GENERATION
     BSD_BACKUP="${BSD_BACKUP_BASE}.$GENERATION"
@@ -914,6 +1403,7 @@ write_backup_pair() {
     fi
 
     tmp="$MANIFEST.tmp.$$"
+    kv="$WORK/backup.kv"
     {
         printf 'schema=3\n'
         printf 'generation=%s\n' "$GENERATION"
@@ -934,12 +1424,23 @@ write_backup_pair() {
         printf 'backup_awgctl_sha256=%s\n' "$ctl_sha"
         printf 'backup_kernel_sha256_path=%s\n' "$KERNEL_SHA256_BACKUP"
         printf 'backup_kernel_sha256_sha256=%s\n' "$ksha_sha"
-    } > "$tmp" && mv -f "$tmp" "$MANIFEST" || die "cannot write $MANIFEST"
+    } > "$kv" || die "cannot write $kv"
+    # F5: keep the installed_* keys of the manifest this run is replacing. The
+    # pair is still the previous one until record_installed_pair commits, so
+    # those keys are correct *and* a run that dies between here and the commit
+    # leaves a manifest that still describes the kernel and tool on disk.
+    if [ -f "$MANIFEST" ]; then
+        manifest_apply_kv "$kv" || die "cannot update $MANIFEST"
+    else
+        mv "$kv" "$tmp" && mv -f "$tmp" "$MANIFEST" || die "cannot write $MANIFEST"
+    fi
     chmod 600 "$MANIFEST" || die "cannot set mode on $MANIFEST"
     log "Backed up the pair: $BSD_BACKUP + $IFCFG_BACKUP (manifest: $MANIFEST)"
 }
 
 # Drop backup generations older than the previous one (kernel is ~30 MB).
+# Generation 1 (the stock baseline) is never pruned — it is required for
+# --uninstall to restore the original system state.
 prune_old_backups() {
     local keep_from g f
     keep_from=$((BACKUP_GEN - 1))
@@ -949,13 +1450,47 @@ prune_old_backups() {
         [ -e "$f" ] || continue
         case "$f" in *".awg-prev."*) g=${f##*.awg-prev.} ;; *) continue ;; esac
         case "$g" in ''|*[!0-9]*) continue ;; esac
+        # Never prune generation 1 (stock baseline)
+        [ "$g" -eq 1 ] && continue
         [ "$g" -lt "$keep_from" ] && rm -f "$f" 2>/dev/null
     done
+    prune_relink_backups
 }
 
 # manifest_get <key>: read one value out of the backup manifest.
 manifest_get() {   # manifest_get <file> <key>
     awk -v k="$2" -F= '$1 == k { print substr($0, length(k) + 2); exit }' "$1"
+}
+
+# F5: does the manifest already describe the kernel + tool that are live now?
+# Used after an interrupted publish: the recovery restores the previous pair, so
+# the manifest must describe that pair, not one the run never finished writing.
+# A generation that installed KARL objects legitimately has a /bsd that differs
+# from the staged hash after the first boot (reorder_kernel relinks it and
+# rewrites /var/db/kernel.SHA256). Treat that as described when the live kernel
+# matches the integrity DB of a generation that recorded relink objects —
+# otherwise every interrupted publish on a booted machine "repairs" a manifest
+# that was already correct, which is exactly the churn F5 is about.
+manifest_describes_live_pair() {
+    local want live state
+    [ -f "$MANIFEST" ] || return 1
+    want=$(manifest_get "$MANIFEST" installed_bsd_sha256)
+    [ -n "$want" ] || return 1
+    live=$(sha256 -q "$BSD_FILE" 2>/dev/null)
+    if [ "$want" != "$live" ]; then
+        state=$(manifest_get "$MANIFEST" relink_state)
+        case "$state" in
+        present|pending)
+            [ -f "$KERNEL_SHA256" ] || return 1
+            [ "$(kernel_db_sha)" = "$live" ] || return 1
+            ;;
+        *) return 1 ;;
+        esac
+    fi
+    want=$(manifest_get "$MANIFEST" installed_ifconfig_sha256)
+    [ -n "$want" ] || return 1
+    [ "$want" = "$(sha256 -q "$IFCFG_FILE" 2>/dev/null)" ] || return 1
+    return 0
 }
 
 # R5-R4-02 + R6 + R8: check the recorded hash of every member before any
@@ -1012,8 +1547,10 @@ restore_pair_member() {
 prepare_durability_helper() {
     # OpenBSD has no fsync(1); compile a fixed, dependency-free helper with
     # base cc. sync(8) may return before writes finish and is not a commit.
-    if [ ! -x "$WORK/awg-fsync" ]; then
-        cc -x c -o "$WORK/awg-fsync" - <<'C' || die "cannot build commit durability helper"
+    # The helper lives in the root-owned install DB (AWG-014 R1 D-2): $WORK is
+    # chowned to the builder, so a helper there can be pre-seeded and replaced.
+    if [ ! -x "$FSYNC_HELPER" ]; then
+        cc -x c -o "$FSYNC_HELPER" - <<'C' || die "cannot build commit durability helper"
         #include <sys/types.h>
         #include <fcntl.h>
         #include <unistd.h>
@@ -1032,19 +1569,19 @@ C
     fi
 }
 
-record_installed_pair() {
-    local kv tmp bsd_sha ifc_sha bsd_size ifc_size hdr_sha ctl_sha
-    prepare_durability_helper
-    [ -f "$MANIFEST" ] || die "no manifest at $MANIFEST — cannot record the installed pair"
-    bsd_sha=$(sha256 -q "$BSD_FILE") || die "cannot hash installed kernel"
-    ifc_sha=$(sha256 -q "$IFCFG_FILE") || die "cannot hash installed ifconfig"
-    bsd_size=$(stat -f %z "$BSD_FILE") || die "cannot stat installed kernel"
-    ifc_size=$(stat -f %z "$IFCFG_FILE") || die "cannot stat installed ifconfig"
+# The installed-pair keys, in manifest order, written to <file>. Shared by the
+# commit (which fsyncs) and the interruption recovery (which cannot rely on the
+# durability helper: the run that failed may be the reason it is unavailable).
+installed_pair_kv() {   # installed_pair_kv <file>
+    local kv=$1 bsd_sha ifc_sha bsd_size ifc_size hdr_sha ctl_sha
+    bsd_sha=$(sha256 -q "$BSD_FILE") || return 1
+    ifc_sha=$(sha256 -q "$IFCFG_FILE") || return 1
+    bsd_size=$(stat -f %z "$BSD_FILE") || return 1
+    ifc_size=$(stat -f %z "$IFCFG_FILE") || return 1
     hdr_sha=""
     ctl_sha=""
-    [ ! -f "$IFAWG_HEADER" ] || hdr_sha=$(sha256 -q "$IFAWG_HEADER") || die "cannot hash installed header"
-    [ ! -f "$AWGCTL_FILE" ] || ctl_sha=$(sha256 -q "$AWGCTL_FILE") || die "cannot hash installed awgctl"
-    kv="$WORK/manifest.kv"
+    [ ! -f "$IFAWG_HEADER" ] || hdr_sha=$(sha256 -q "$IFAWG_HEADER") || return 1
+    [ ! -f "$AWGCTL_FILE" ] || ctl_sha=$(sha256 -q "$AWGCTL_FILE") || return 1
     {
         printf 'installed_bsd_sha256=%s\n' "$bsd_sha"
         printf 'installed_bsd_size=%s\n' "$bsd_size"
@@ -1053,7 +1590,22 @@ record_installed_pair() {
         printf 'installed_if_awg_h_sha256=%s\n' "$hdr_sha"
         printf 'installed_awgctl_sha256=%s\n' "$ctl_sha"
         printf 'installed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$kv" || die "cannot write $kv — cannot record the installed pair"
+        # F9: the relink state is read back from disk, not remembered from the
+        # publish: an install, a rollback and a repair all land here, and the
+        # manifest must describe what is on the filesystem now.
+        printf 'relink_state=%s\n' "$(relink_state_now)"
+        printf 'relink_path=%s\n' "$(relink_dir)"
+        printf 'relink_objects=%s\n' "$(relink_object_count)"
+        printf 'relink_backup_path=%s\n' "$RELINK_BACKUP"
+    } > "$kv"
+}
+
+record_installed_pair() {
+    local kv tmp
+    prepare_durability_helper
+    [ -f "$MANIFEST" ] || die "no manifest at $MANIFEST — cannot record the installed pair"
+    kv="$WORK/manifest.kv"
+    installed_pair_kv "$kv" || die "cannot hash the installed pair"
     tmp="$MANIFEST.tmp.$$"
     awk -v kvf="$kv" '
         BEGIN {
@@ -1071,18 +1623,33 @@ record_installed_pair() {
         END {
             for (i = 1; i <= n; i++) { k = order[i]; if (k in seen) print k "=" val[k] }
         }
-    ' "$MANIFEST" > "$tmp" && "$WORK/awg-fsync" "$tmp" \
+    ' "$MANIFEST" > "$tmp" && "$FSYNC_HELPER" "$tmp" \
         && mv -f "$tmp" "$MANIFEST" \
         || die "could not record the installed pair in $MANIFEST"
     # The commit is not complete until both content and directory entry are
     # durable. Also flush installed members and their parent directories.
     for kv in "$BSD_FILE" "$IFCFG_FILE" "$IFAWG_HEADER" "$AWGCTL_FILE"; do
-        [ ! -f "$kv" ] || "$WORK/awg-fsync" "$kv" "$(dirname "$kv")" \
+        [ ! -f "$kv" ] || "$FSYNC_HELPER" "$kv" "$(dirname "$kv")" \
             || die "cannot make installed member $kv durable"
     done
-    "$WORK/awg-fsync" "$MANIFEST" "$(dirname "$MANIFEST")" \
+    "$FSYNC_HELPER" "$MANIFEST" "$(dirname "$MANIFEST")" \
         || die "cannot make commit record durable"
     log "Recorded the installed pair in $MANIFEST"
+}
+
+# Recovery path (F5): the pair has just been restored, so rewrite the
+# installed_* keys from the files that are live now. No durability helper: the
+# interrupted run may be why it is unusable, and the restore already fsync'd
+# the members it wrote.
+recover_installed_record() {
+    local kv
+    [ -f "$MANIFEST" ] || { echo "no manifest at $MANIFEST" >&2; return 1; }
+    kv="$WORK/manifest.recover.kv"
+    installed_pair_kv "$kv" 2>>"$LOGFILE" || { echo "cannot hash the restored pair" >&2; return 1; }
+    manifest_apply_kv "$kv" >> "$LOGFILE" 2>&1 \
+        || { echo "cannot rewrite the installed-pair keys in $MANIFEST" >&2; return 1; }
+    log "Recorded the restored pair in $MANIFEST"
+    return 0
 }
 
 # R4-14: awgctl is part of the release delivery: built from sbin/awgctl with
@@ -1090,11 +1657,19 @@ record_installed_pair() {
 # manifest and restored by --rollback together with kernel + tool + header.
 install_awgctl() {
     step "awgctl — management tool (build)"
+    # R1 review: objects go to a per-run directory under $TMPDIR (bsd.prog.mk
+    # honours OBJDIR), so two workers building the same repo layout in two
+    # worktrees do not share one object directory.
+    AWGCTL_OBJDIR=$(mktemp -d "${TMPDIR:-/tmp}/awg-awgctl-obj.XXXXXX") \
+        || die "cannot create the awgctl object directory"
     hand_tree_to_builder "$REPODIR/sbin/awgctl"
-    log "Building awgctl"
-    builder_make "$REPODIR/sbin/awgctl" || die "awgctl build failed"
-    [ -x "$REPODIR/sbin/awgctl/awgctl" ] || die "awgctl build produced no binary"
-    AWGCTL_ARTIFACT="$REPODIR/sbin/awgctl/awgctl"
+    hand_tree_to_builder "$AWGCTL_OBJDIR"
+    log "Building awgctl (objects in $AWGCTL_OBJDIR)"
+    builder_make "$REPODIR/sbin/awgctl" "OBJDIR=$AWGCTL_OBJDIR" \
+        || die "awgctl build failed"
+    [ -x "$AWGCTL_OBJDIR/awgctl" ] \
+        || die "awgctl build produced no binary in $AWGCTL_OBJDIR"
+    AWGCTL_ARTIFACT="$AWGCTL_OBJDIR/awgctl"
     log "awgctl built: $AWGCTL_ARTIFACT"
 }
 
@@ -1109,6 +1684,19 @@ publish_awgctl() {
                  "$AWGCTL_MAN_DIR/awgctl.8" || return 1; }
     log "awgctl installed to $AWGCTL_FILE (with awgctl.8)"
     return 0
+}
+
+# F5: the manifest as it stood before this run touched anything. It must be
+# taken *before* write_backup_pair, which rewrites the file from scratch with
+# only backup_* keys: copying it afterwards snapshotted a manifest that had
+# already lost every installed_* key, so recovery "restored" a manifest that
+# described no installed member at all and the next --check reported
+# `ifconfig sha : MISMATCH (… vs manifest )`.
+snapshot_precommit_manifest() {
+    rm -f "$WORK/precommit.manifest"
+    [ -f "$MANIFEST" ] || return 0
+    cp "$MANIFEST" "$WORK/precommit.manifest" \
+        || die "cannot save precommit manifest"
 }
 
 # R6-R4-02: signal handler for an interrupted publish: restore the recorded
@@ -1131,14 +1719,36 @@ rollback_uncommitted() {
         return 22
     fi
     if restore_previous_pair; then
+        # F9: the relink objects are part of what a publish changes; the
+        # restored kernel must come back with the objects that match it.
+        restore_relink_generation interrupt \
+            || { echo "ERROR: $reason: rollback failed (state: relink objects)" >&2; return 21; }
+        # F5: the manifest must describe the pair that is live again.
+        # 1. the snapshot taken before write_backup_pair is the exact previous
+        #    manifest (all five members *and* every installed_* key);
+        # 2. if it is missing or describes something else (an older run, a
+        #    damaged snapshot), rewrite the installed_* keys from the pair that
+        #    was just restored rather than leaving a manifest that promises a
+        #    kernel nobody installed.
         if [ -f "$WORK/precommit.manifest" ]; then
             cp "$WORK/precommit.manifest" "$MANIFEST.rollback.$$" \
                 && mv -f "$MANIFEST.rollback.$$" "$MANIFEST" \
                 || { echo "ERROR: $reason: rollback failed (state: manifest restore)" >&2; return 21; }
         fi
-        if [ -x "$WORK/awg-fsync" ]; then
+        if ! manifest_describes_live_pair; then
+            if [ -f "$WORK/precommit.manifest" ]; then
+                echo "note: the pre-run manifest does not describe the restored pair — rewriting its installed_* keys" >&2
+            else
+                echo "note: no pre-run manifest snapshot — recording the restored pair" >&2
+            fi
+            if ! (recover_installed_record) >> "$LOGFILE" 2>&1; then
+                echo "ERROR: $reason: rollback failed (state: manifest record)" >&2
+                return 21
+            fi
+        fi
+        if [ -x "$FSYNC_HELPER" ]; then
             for member in "$BSD_FILE" "$IFCFG_FILE" "$IFAWG_HEADER" "$AWGCTL_FILE" "$MANIFEST"; do
-                [ ! -f "$member" ] || "$WORK/awg-fsync" "$member" "$(dirname "$member")" \
+                [ ! -f "$member" ] || "$FSYNC_HELPER" "$member" "$(dirname "$member")" \
                     || { echo "ERROR: $reason: rollback failed (state: durability)" >&2; return 21; }
             done
         fi
@@ -1166,8 +1776,8 @@ publish_abort() {
 publish_pair() {
     step "Publish kernel + management tool (transactional)"
     prepare_durability_helper
+    snapshot_precommit_manifest
     write_backup_pair
-    cp "$MANIFEST" "$WORK/precommit.manifest" || die "cannot save precommit manifest"
     PUBLISH_STARTED=yes
     trap 'publish_interrupted' HUP INT TERM
     if ! publish_ifconfig; then
@@ -1178,6 +1788,10 @@ publish_pair() {
     fi
     if ! kernel_publish; then
         publish_abort "kernel publish failed"
+    fi
+    # F9: the kernel is only relinkable if its objects travel with it.
+    if ! publish_relink_objects; then
+        publish_abort "KARL relink objects publish failed"
     fi
     if ! publish_awgctl; then
         publish_abort "awgctl publish failed"
@@ -1260,18 +1874,30 @@ restore_generation_pair() {
 # kernel with the old management tool while the log claimed a pair restore).
 restore_previous_pair() {
     local bsd_path ifc_path hdr_path ctl_path bsd_sha ifc_sha hdr_sha ctl_sha
-    local ksha_path ksha_sha
-    step "Restoring the previous pair (generation $BACKUP_GEN)"
+    local ksha_path ksha_sha restore_gen
+    restore_gen=$(manifest_get "$MANIFEST" backup_generation)
+    [ -n "$restore_gen" ] || restore_gen=$(manifest_get "$MANIFEST" generation)
+    case "$restore_gen" in ''|*[!0-9]*) restore_gen=0 ;; esac
+    step "Restoring the previous pair (generation $restore_gen)"
     bsd_path=$(manifest_get "$MANIFEST" backup_bsd_path)
     ifc_path=$(manifest_get "$MANIFEST" backup_ifconfig_path)
     hdr_path=$(manifest_get "$MANIFEST" backup_if_awg_h_path)
     ctl_path=$(manifest_get "$MANIFEST" backup_awgctl_path)
     ksha_path=$(manifest_get "$MANIFEST" backup_kernel_sha256_path)
-    [ -n "$bsd_path" ] || bsd_path="$BSD_BACKUP"
-    [ -n "$ifc_path" ] || ifc_path="$IFCFG_BACKUP"
-    [ -n "$hdr_path" ] || hdr_path="$IFAWG_BACKUP"
-    [ -n "$ctl_path" ] || ctl_path="$AWGCTL_BACKUP"
-    [ -n "$ksha_path" ] || ksha_path="$KERNEL_SHA256_BACKUP"
+    if [ "$restore_gen" -gt 0 ]; then
+        [ -n "$bsd_path" ] || bsd_path="${BSD_BACKUP_BASE}.$restore_gen"
+        [ -n "$ifc_path" ] || ifc_path="${IFCFG_BACKUP_BASE}.$restore_gen"
+        [ -n "$hdr_path" ] || hdr_path="${IFAWG_BACKUP_BASE}.$restore_gen"
+        [ -n "$ctl_path" ] || ctl_path="${AWGCTL_BACKUP_BASE}.$restore_gen"
+        [ -n "$ksha_path" ] || ksha_path="${KERNEL_SHA256_BACKUP_BASE}.$restore_gen"
+    else
+        # Old manifest format (schema < 3) without generation stamping
+        [ -n "$bsd_path" ] || bsd_path="$BSD_BACKUP"
+        [ -n "$ifc_path" ] || ifc_path="$IFCFG_BACKUP"
+        [ -n "$hdr_path" ] || hdr_path="$IFAWG_BACKUP"
+        [ -n "$ctl_path" ] || ctl_path="$AWGCTL_BACKUP"
+        [ -n "$ksha_path" ] || ksha_path="$KERNEL_SHA256_BACKUP"
+    fi
     bsd_sha=$(manifest_get "$MANIFEST" backup_bsd_sha256)
     ifc_sha=$(manifest_get "$MANIFEST" backup_ifconfig_sha256)
     hdr_sha=$(manifest_get "$MANIFEST" backup_if_awg_h_sha256)
@@ -1282,7 +1908,7 @@ restore_previous_pair() {
             "$ksha_path" "$ksha_sha"; then
         return 1
     fi
-    log "Previous pair restored (generation $BACKUP_GEN: $BSD_FILE + $IFCFG_FILE + $IFAWG_HEADER + $AWGCTL_FILE + $KERNEL_SHA256)"
+    log "Previous pair restored (generation $restore_gen: $BSD_FILE + $IFCFG_FILE + $IFAWG_HEADER + $AWGCTL_FILE + $KERNEL_SHA256)"
 }
 
 # R4-02 + R5: --rollback restores the whole recorded generation (kernel, tool,
@@ -1290,20 +1916,39 @@ restore_previous_pair() {
 # members that generation did not have, then rewrites the installed-pair keys.
 rollback_pair() {
     local bsd_path ifc_path hdr_path ctl_path bsd_sha ifc_sha hdr_sha ctl_sha
-    local ksha_path ksha_sha
+    local ksha_path ksha_sha restore_gen
+
+    restore_gen=$(manifest_get "$MANIFEST" backup_generation)
+    [ -n "$restore_gen" ] || restore_gen=$(manifest_get "$MANIFEST" generation)
+    case "$restore_gen" in ''|*[!0-9]*) restore_gen=0 ;; esac
 
     step "Rollback to the previous kernel/tool/header/awgctl generation"
     [ -f "$MANIFEST" ] || die "no backup manifest at $MANIFEST — nothing to roll back"
+    # F6: BACKUP_GEN only exists in a run that took a backup; on --rollback it
+    # was 0, so a corrupt generation was reported as "generation 0 rollback
+    # failed" instead of the generation that actually failed.
+    BACKUP_GEN=$(manifest_get "$MANIFEST" backup_generation)
+    case "$BACKUP_GEN" in ''|*[!0-9]*) BACKUP_GEN=$(manifest_get "$MANIFEST" generation) ;; esac
+    case "$BACKUP_GEN" in ''|*[!0-9]*) BACKUP_GEN=0 ;; esac
     bsd_path=$(manifest_get "$MANIFEST" backup_bsd_path)
     ifc_path=$(manifest_get "$MANIFEST" backup_ifconfig_path)
     hdr_path=$(manifest_get "$MANIFEST" backup_if_awg_h_path)
     ctl_path=$(manifest_get "$MANIFEST" backup_awgctl_path)
     ksha_path=$(manifest_get "$MANIFEST" backup_kernel_sha256_path)
-    [ -n "$bsd_path" ] || bsd_path="$BSD_BACKUP"
-    [ -n "$ifc_path" ] || ifc_path="$IFCFG_BACKUP"
-    [ -n "$hdr_path" ] || hdr_path="$IFAWG_BACKUP"
-    [ -n "$ctl_path" ] || ctl_path="$AWGCTL_BACKUP"
-    [ -n "$ksha_path" ] || ksha_path="$KERNEL_SHA256_BACKUP"
+    if [ "$restore_gen" -gt 0 ]; then
+        [ -n "$bsd_path" ] || bsd_path="${BSD_BACKUP_BASE}.$restore_gen"
+        [ -n "$ifc_path" ] || ifc_path="${IFCFG_BACKUP_BASE}.$restore_gen"
+        [ -n "$hdr_path" ] || hdr_path="${IFAWG_BACKUP_BASE}.$restore_gen"
+        [ -n "$ctl_path" ] || ctl_path="${AWGCTL_BACKUP_BASE}.$restore_gen"
+        [ -n "$ksha_path" ] || ksha_path="${KERNEL_SHA256_BACKUP_BASE}.$restore_gen"
+    else
+        # Old manifest format (schema < 3) without generation stamping
+        [ -n "$bsd_path" ] || bsd_path="$BSD_BACKUP"
+        [ -n "$ifc_path" ] || ifc_path="$IFCFG_BACKUP"
+        [ -n "$hdr_path" ] || hdr_path="$IFAWG_BACKUP"
+        [ -n "$ctl_path" ] || ctl_path="$AWGCTL_BACKUP"
+        [ -n "$ksha_path" ] || ksha_path="$KERNEL_SHA256_BACKUP"
+    fi
     bsd_sha=$(manifest_get "$MANIFEST" backup_bsd_sha256)
     ifc_sha=$(manifest_get "$MANIFEST" backup_ifconfig_sha256)
     hdr_sha=$(manifest_get "$MANIFEST" backup_if_awg_h_sha256)
@@ -1326,7 +1971,7 @@ rollback_pair() {
         if ! restore_generation_pair "$bsd_path" "$ifc_path" "$hdr_path" "$ctl_path" \
                 "$bsd_sha" "$ifc_sha" "$hdr_sha" "$ctl_sha" \
                 "$ksha_path" "$ksha_sha"; then
-            die "generation $BACKUP_GEN rollback failed (state: ${RESTORE_STATE:-nothing written}): the recorded members were not applied as a set"
+            die "generation $restore_gen rollback failed (state: ${RESTORE_STATE:-nothing written}): the recorded members were not applied as a set"
         fi
         # R8: the recorded generation carries its own kernel.SHA256; only a
         # generation that predates that member needs a re-hash.
@@ -1334,13 +1979,393 @@ rollback_pair() {
             || log "warning: could not update $KERNEL_SHA256 (syspatch will ask to rebuild it)"
         log "Quadruple restored: $BSD_FILE + $IFCFG_FILE + $IFAWG_HEADER + $AWGCTL_FILE (+ $KERNEL_SHA256) — reboot to activate the kernel"
     fi
+    # F9: the relink objects are part of the pair. Restoring a kernel while
+    # leaving the newer objects in place makes the next boot relink a kernel
+    # the operator just rolled away from.
+    restore_relink_generation \
+        || die "generation $BACKUP_GEN rollback: the kernel was restored but its relink objects were not — check $RELINK_KERNEL_DIR"
     record_installed_pair
+}
+
+# Identify the stock baseline generation (generation 1). The stock baseline is
+# the first generation recorded by this installer; it represents the pre-AWG
+# system state. Subsequent installs/upgrades create higher generations, but the
+# stock baseline must be preserved for --uninstall. If generation 1 backups or
+# manifest are missing/corrupt, or if the generation 1 backups don't match the
+# pre-install inventory hashes, the stock baseline is unavailable and uninstall
+# must fail closed without discarding recovery data.
+identify_stock_generation() {
+    local stock_bsd stock_ifc stock_hdr stock_ctl stock_ksha
+    stock_bsd="${BSD_BACKUP_BASE}.1"
+    stock_ifc="${IFCFG_BACKUP_BASE}.1"
+    stock_hdr="${IFAWG_BACKUP_BASE}.1"
+    stock_ctl="${AWGCTL_BACKUP_BASE}.1"
+    stock_ksha="${KERNEL_SHA256_BACKUP_BASE}.1"
+
+    [ -f "$stock_bsd" ] || { echo "stock baseline missing: $stock_bsd not found" >&2; return 1; }
+    [ -f "$stock_ifc" ] || { echo "stock baseline missing: $stock_ifc not found" >&2; return 1; }
+
+    STOCK_GEN=1
+    STOCK_BSD_PATH="$stock_bsd"
+    STOCK_IFCFG_PATH="$stock_ifc"
+    STOCK_IFAWG_PATH="$stock_hdr"
+    STOCK_AWGCTL_PATH="$stock_ctl"
+    STOCK_KSHA_PATH="$stock_ksha"
+
+    # Verify the stock backup files are readable and non-empty
+    for f in "$STOCK_BSD_PATH" "$STOCK_IFCFG_PATH"; do
+        [ -s "$f" ] || { echo "stock baseline corrupt: $f empty or unreadable" >&2; return 1; }
+    done
+
+    # If pre-install inventory exists, verify generation 1 backups match the
+    # recorded pre-install hashes. This authenticates that the generation 1
+    # backups are truly the original stock baseline, not a later generation.
+    local inv="$INSTALL_DB/preinstall.inventory"
+    if [ -f "$inv" ]; then
+        local expected_bsd expected_ifc expected_hdr expected_ctl expected_ksha
+        expected_bsd=$(awk -F= -v k="stock_bsd_sha256" '$1==k {print $2}' "$inv")
+        expected_ifc=$(awk -F= -v k="stock_ifconfig_sha256" '$1==k {print $2}' "$inv")
+        expected_ksha=$(awk -F= -v k="stock_kernel_sha256_sha256" '$1==k {print $2}' "$inv")
+
+        local actual_bsd actual_ifc actual_hdr actual_ctl actual_ksha
+        actual_bsd=$(sha256 -q "$STOCK_BSD_PATH") || return 1
+        actual_ifc=$(sha256 -q "$STOCK_IFCFG_PATH") || return 1
+        [ -f "$STOCK_IFAWG_PATH" ] && actual_hdr=$(sha256 -q "$STOCK_IFAWG_PATH")
+        [ -f "$STOCK_AWGCTL_PATH" ] && actual_ctl=$(sha256 -q "$STOCK_AWGCTL_PATH")
+        [ -f "$STOCK_KSHA_PATH" ] && actual_ksha=$(sha256 -q "$STOCK_KSHA_PATH")
+
+        [ -z "$expected_bsd" ] || [ "$actual_bsd" = "$expected_bsd" ] \
+            || { echo "stock baseline hash mismatch: kernel backup does not match pre-install inventory" >&2; return 1; }
+        [ -z "$expected_ifc" ] || [ "$actual_ifc" = "$expected_ifc" ] \
+            || { echo "stock baseline hash mismatch: ifconfig backup does not match pre-install inventory" >&2; return 1; }
+        # Header and awgctl are AWG additions; they don't exist in stock OpenBSD.
+        # If generation 1 has them (from a kernel-only install), they are not
+        # authenticated against stock hashes (which don't exist).
+        [ -z "$expected_ksha" ] || [ "$actual_ksha" = "$expected_ksha" ] \
+            || { echo "stock baseline hash mismatch: kernel.SHA256 backup does not match pre-install inventory" >&2; return 1; }
+
+        log "Stock baseline generation 1 authenticated via pre-install inventory"
+    else
+        # No pre-install inventory: cannot authenticate the stock baseline.
+        # This happens on older installations before this feature. Fail closed
+        # to preserve recovery data.
+        echo "stock baseline cannot be authenticated: no pre-install inventory at $inv" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# Record pre-install state of non-pair artifacts so uninstall can restore or
+# document what it cannot. This runs on the *first* install (when no manifest
+# exists yet) and captures:
+#   - awg-quick: existence, content hash, mode, owner, group
+#   - awgctl.8 manpage: existence, content hash, mode, owner, group
+#   - config directory: existence, mode, owner, group, file listing with hashes
+#   - /obsd: existence, content hash (if different from /bsd)
+#   - pf.conf: existence, content hash, and whether .awg.bak exists
+# The record is stored in $INSTALL_DB/preinstall.inventory and is immutable
+# once written (like the manifest, written tmp+rename).
+record_preinstall_inventory() {
+    local inv="$INSTALL_DB/preinstall.inventory"
+    local tmp
+
+    [ -f "$inv" ] && { log "Pre-install inventory already recorded at $inv"; return 0; }
+
+    mkdir -p "$INSTALL_DB" || die "cannot create $INSTALL_DB"
+    chown root:wheel "$INSTALL_DB" 2>/dev/null || true
+    chmod 700 "$INSTALL_DB" || die "cannot set mode on $INSTALL_DB"
+
+    tmp="$inv.tmp.$$"
+    {
+        printf 'schema=1\n'
+        printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        # Stock baseline hashes (live pair members before any AWG changes)
+        # These are used to authenticate generation 1 backups during uninstall.
+        # Stock OpenBSD has bsd, ifconfig, and kernel.SHA256. The header
+        # (if_awg.h) and awgctl are AWG additions and don't exist in stock.
+        [ -f "$BSD_FILE" ] && printf 'stock_bsd_sha256=%s\n' "$(sha256 -q "$BSD_FILE")"
+        [ -f "$IFCFG_FILE" ] && printf 'stock_ifconfig_sha256=%s\n' "$(sha256 -q "$IFCFG_FILE")"
+        [ -f "$KERNEL_SHA256" ] && printf 'stock_kernel_sha256_sha256=%s\n' "$(sha256 -q "$KERNEL_SHA256")"
+
+        # awg-quick
+        if [ -f "$AWG_QUICK_FILE" ]; then
+            printf 'awg_quick_existed=yes\n'
+            printf 'awg_quick_sha256=%s\n' "$(sha256 -q "$AWG_QUICK_FILE")"
+            printf 'awg_quick_mode=%s\n' "$(stat -f '%Sp' "$AWG_QUICK_FILE")"
+            printf 'awg_quick_owner=%s\n' "$(stat -f '%Su' "$AWG_QUICK_FILE")"
+            printf 'awg_quick_group=%s\n' "$(stat -f '%Sg' "$AWG_QUICK_FILE")"
+        else
+            printf 'awg_quick_existed=no\n'
+        fi
+
+        # awgctl.8 manpage
+        local manpage="$AWGCTL_MAN_DIR/awgctl.8"
+        if [ -f "$manpage" ]; then
+            printf 'awgctl_man_existed=yes\n'
+            printf 'awgctl_man_sha256=%s\n' "$(sha256 -q "$manpage")"
+            printf 'awgctl_man_mode=%s\n' "$(stat -f '%Sp' "$manpage")"
+            printf 'awgctl_man_owner=%s\n' "$(stat -f '%Su' "$manpage")"
+            printf 'awgctl_man_group=%s\n' "$(stat -f '%Sg' "$manpage")"
+        else
+            printf 'awgctl_man_existed=no\n'
+        fi
+
+        # config directory
+        if [ -d "$AWG_CONF_DIR" ]; then
+            printf 'conf_dir_existed=yes\n'
+            printf 'conf_dir_mode=%s\n' "$(stat -f '%Sp' "$AWG_CONF_DIR")"
+            printf 'conf_dir_owner=%s\n' "$(stat -f '%Su' "$AWG_CONF_DIR")"
+            printf 'conf_dir_group=%s\n' "$(stat -f '%Sg' "$AWG_CONF_DIR")"
+            # List files with hashes
+            find "$AWG_CONF_DIR" -type f -print | sort | while read -r f; do
+                printf 'conf_file=%s:%s\n' "$f" "$(sha256 -q "$f")"
+            done
+        else
+            printf 'conf_dir_existed=no\n'
+        fi
+
+        # /obsd
+        if [ -f "$OBSD_FILE" ]; then
+            printf 'obsd_existed=yes\n'
+            printf 'obsd_sha256=%s\n' "$(sha256 -q "$OBSD_FILE" 2>/dev/null || echo '')"
+        else
+            printf 'obsd_existed=no\n'
+        fi
+
+        # pf.conf and .awg.bak
+        if [ -f "$PF_CONF_FILE" ]; then
+            printf 'pf_conf_existed=yes\n'
+            printf 'pf_conf_sha256=%s\n' "$(sha256 -q "$PF_CONF_FILE")"
+        else
+            printf 'pf_conf_existed=no\n'
+        fi
+        local pf_bak="${PF_CONF_FILE}.awg.bak"
+        if [ -f "$pf_bak" ]; then
+            printf 'pf_conf_awg_bak_existed=yes\n'
+            printf 'pf_conf_awg_bak_sha256=%s\n' "$(sha256 -q "$pf_bak")"
+        else
+            printf 'pf_conf_awg_bak_existed=no\n'
+        fi
+
+    } > "$tmp" && mv -f "$tmp" "$inv" || die "cannot write $inv"
+    chmod 600 "$inv" || die "cannot set mode on $inv"
+    log "Recorded pre-install inventory at $inv"
+}
+
+# Restore non-pair artifacts from the pre-install inventory. This is best-
+# effort: artifacts that didn't exist pre-install are removed; artifacts that
+# did exist are restored to their recorded state. The inventory is read-only;
+# it is never modified by uninstall.
+restore_preinstall_inventory() {
+    local inv="$INSTALL_DB/preinstall.inventory"
+    local key val
+
+    [ -f "$inv" ] || { log "No pre-install inventory at $inv; cannot restore non-pair artifacts precisely"; return 1; }
+
+    # awg-quick
+    key="awg_quick_existed"
+    val=$(awk -F= -v k="$key" '$1==k {print $2}' "$inv")
+    if [ "$val" = "yes" ]; then
+        local sha mode owner group
+        sha=$(awk -F= -v k="awg_quick_sha256" '$1==k {print $2}' "$inv")
+        mode=$(awk -F= -v k="awg_quick_mode" '$1==k {print $2}' "$inv")
+        owner=$(awk -F= -v k="awg_quick_owner" '$1==k {print $2}' "$inv")
+        group=$(awk -F= -v k="awg_quick_group" '$1==k {print $2}' "$inv")
+        # We cannot restore content from hash alone; document the mismatch.
+        log "NOTICE: awg-quick existed pre-install (sha256 $sha, mode $mode, owner $owner:$group) but content cannot be restored from hash alone; manual restore required"
+    else
+        [ -f "$AWG_QUICK_FILE" ] && rm -f "$AWG_QUICK_FILE" && log "Removed $AWG_QUICK_FILE (not present pre-install)"
+    fi
+
+    # awgctl.8 manpage
+    key="awgctl_man_existed"
+    val=$(awk -F= -v k="$key" '$1==k {print $2}' "$inv")
+    local manpage="$AWGCTL_MAN_DIR/awgctl.8"
+    if [ "$val" = "yes" ]; then
+        local sha mode owner group
+        sha=$(awk -F= -v k="awgctl_man_sha256" '$1==k {print $2}' "$inv")
+        mode=$(awk -F= -v k="awgctl_man_mode" '$1==k {print $2}' "$inv")
+        owner=$(awk -F= -v k="awgctl_man_owner" '$1==k {print $2}' "$inv")
+        group=$(awk -F= -v k="awgctl_man_group" '$1==k {print $2}' "$inv")
+        log "NOTICE: awgctl.8 existed pre-install (sha256 $sha, mode $mode, owner $owner:$group) but content cannot be restored from hash alone; manual restore required"
+    else
+        [ -f "$manpage" ] && rm -f "$manpage" && log "Removed $manpage (not present pre-install)"
+    fi
+
+    # config directory
+    key="conf_dir_existed"
+    val=$(awk -F= -v k="$key" '$1==k {print $2}' "$inv")
+    if [ "$val" = "yes" ]; then
+        local mode owner group
+        mode=$(awk -F= -v k="conf_dir_mode" '$1==k {print $2}' "$inv")
+        owner=$(awk -F= -v k="conf_dir_owner" '$1==k {print $2}' "$inv")
+        group=$(awk -F= -v k="conf_dir_group" '$1==k {print $2}' "$inv")
+        if [ "$PURGE_CONFIGS" = yes ]; then
+            if [ -d "$AWG_CONF_DIR" ]; then
+                rm -rf "$AWG_CONF_DIR" && log "Removed $AWG_CONF_DIR (--purge-configs requested)"
+                rmdir "$(dirname "$AWG_CONF_DIR")" 2>/dev/null
+            fi
+        else
+            # Re-apply the recorded mode if it differs
+            if [ -d "$AWG_CONF_DIR" ]; then
+                local current_mode
+                current_mode=$(stat -f '%Sp' "$AWG_CONF_DIR" 2>/dev/null)
+                if [ "$current_mode" != "$mode" ]; then
+                    chmod "$mode" "$AWG_CONF_DIR" 2>/dev/null && log "Re-applied config dir mode $mode"
+                fi
+            fi
+            log "Preserving $AWG_CONF_DIR and its contents (pre-install dir, use --purge-configs to remove)"
+        fi
+    else
+        if [ -d "$AWG_CONF_DIR" ]; then
+            rm -rf "$AWG_CONF_DIR" && log "Removed $AWG_CONF_DIR (not present pre-install)"
+            rmdir "$(dirname "$AWG_CONF_DIR")" 2>/dev/null
+        fi
+    fi
+
+    # /obsd - restore from the restored stock /bsd if it existed pre-install
+    key="obsd_existed"
+    val=$(awk -F= -v k="$key" '$1==k {print $2}' "$inv")
+    if [ "$val" = "yes" ]; then
+        local expected_sha
+        expected_sha=$(awk -F= -v k="obsd_sha256" '$1==k {print $2}' "$inv")
+        if [ -f "$BSD_FILE" ]; then
+            local actual_sha
+            actual_sha=$(sha256 -q "$BSD_FILE" 2>/dev/null)
+            if [ -n "$expected_sha" ] && [ "$actual_sha" = "$expected_sha" ]; then
+                ln -f "$BSD_FILE" "$OBSD_FILE" 2>/dev/null || cp -p "$BSD_FILE" "$OBSD_FILE" 2>/dev/null || true
+                log "Restored $OBSD_FILE from restored stock /bsd"
+            else
+                log "NOTICE: $OBSD_FILE existed pre-install (sha256 $expected_sha) but restored /bsd differs; cannot restore automatically"
+            fi
+        else
+            log "NOTICE: $OBSD_FILE existed pre-install but /bsd not available; cannot restore automatically"
+        fi
+    else
+        # If /obsd exists now and wasn't there pre-install, remove it
+        if [ -f "$OBSD_FILE" ]; then
+            rm -f "$OBSD_FILE" && log "Removed $OBSD_FILE (not present pre-install)"
+        fi
+    fi
+
+    # pf.conf - restore from .awg.bak if it exists and matches recorded hash
+    key="pf_conf_existed"
+    val=$(awk -F= -v k="$key" '$1==k {print $2}' "$inv")
+    if [ "$val" = "yes" ]; then
+        local recorded_sha
+        recorded_sha=$(awk -F= -v k="pf_conf_sha256" '$1==k {print $2}' "$inv")
+        local pf_bak="${PF_CONF_FILE}.awg.bak"
+        if [ -f "$pf_bak" ]; then
+            local bak_sha
+            bak_sha=$(sha256 -q "$pf_bak" 2>/dev/null)
+            if [ "$bak_sha" = "$recorded_sha" ]; then
+                cp -p "$pf_bak" "$PF_CONF_FILE"
+                pfctl -f "$PF_CONF_FILE" 2>/dev/null && log "Restored $PF_CONF_FILE from .awg.bak" || log "WARNING: restored pf.conf but reload failed"
+                rm -f "$pf_bak" && log "Removed $pf_bak (restored)"
+            else
+                log "NOTICE: $pf_bak hash ($bak_sha) does not match pre-install ($recorded_sha); manual restore required"
+            fi
+        else
+            log "NOTICE: $PF_CONF_FILE existed pre-install but no .awg.bak found; cannot restore automatically"
+        fi
+    else
+        # pf.conf didn't exist pre-install; if .awg.bak exists, it was created by us, remove it
+        local pf_bak="${PF_CONF_FILE}.awg.bak"
+        if [ -f "$pf_bak" ]; then
+            rm -f "$pf_bak" && log "Removed $pf_bak (pf.conf not present pre-install)"
+        fi
+    fi
+
+    return 0
+}
+
+# Remove all AWG backup generations (generation 1 through current). This is
+# called after successful stock baseline restoration.
+remove_all_backup_generations() {
+    local f g
+    for f in "$BSD_BACKUP_BASE".* "$IFCFG_BACKUP_BASE".* \
+             "$IFAWG_BACKUP_BASE".* "$AWGCTL_BACKUP_BASE".* \
+             "$KERNEL_SHA256_BACKUP_BASE".*; do
+        [ -e "$f" ] || continue
+        case "$f" in *".awg-prev."*) g=${f##*.awg-prev.} ;; *) continue ;; esac
+        case "$g" in ''|*[!0-9]*) continue ;; esac
+        rm -f "$f" 2>/dev/null && log "Removed backup $f"
+    done
+}
+
+# uninstall_all: restore the original stock baseline (generation 1) and remove
+# AWG artifacts. This reuses the paired rollback machinery (restore_generation_pair)
+# with the stock generation's backups. Fails closed if the stock baseline cannot
+# be authenticated. Idempotent: if already uninstalled (stock live, no AWG artifacts),
+# succeeds without changes.
+uninstall_all() {
+    step "Uninstall: restore original stock baseline (generation 1), remove AWG artifacts"
+
+    # Idempotency check: if already uninstalled, succeed quietly.
+    # Stock is live when /bsd matches the stock baseline (generation 1 backup)
+    # and no AWG artifacts (awg-quick, awgctl, header) are present.
+    if [ -f "${BSD_BACKUP_BASE}.1" ] && [ -f "${IFCFG_BACKUP_BASE}.1" ]; then
+        local live_bsd_sha stock_bsd_sha
+        live_bsd_sha=$(sha256 -q "$BSD_FILE" 2>/dev/null)
+        stock_bsd_sha=$(sha256 -q "${BSD_BACKUP_BASE}.1" 2>/dev/null)
+        if [ -n "$live_bsd_sha" ] && [ "$live_bsd_sha" = "$stock_bsd_sha" ]; then
+            # Stock kernel is live. Check if AWG artifacts exist.
+            if [ ! -f "$AWG_QUICK_FILE" ] && [ ! -f "$AWGCTL_FILE" ] && [ ! -f "$IFAWG_HEADER" ]; then
+                log "Already uninstalled: stock baseline live, no AWG artifacts present"
+                return 0
+            fi
+        fi
+    fi
+
+    # First, identify and authenticate the stock baseline (generation 1)
+    if ! identify_stock_generation; then
+        die "stock baseline unavailable or corrupt — refusing to uninstall; recovery data preserved at $INSTALL_DB"
+    fi
+
+    # Validate the stock generation's backup files have matching hashes before
+    # any write. We compute hashes of the stock backup files and use them as
+    # the expected values for restore_generation_pair.
+    local bsd_sha ifc_sha hdr_sha ctl_sha ksha_sha
+    bsd_sha=$(sha256 -q "$STOCK_BSD_PATH") || die "cannot hash stock kernel backup"
+    ifc_sha=$(sha256 -q "$STOCK_IFCFG_PATH") || die "cannot hash stock ifconfig backup"
+    hdr_sha=""
+    [ -f "$STOCK_IFAWG_PATH" ] && hdr_sha=$(sha256 -q "$STOCK_IFAWG_PATH")
+    ctl_sha=""
+    [ -f "$STOCK_AWGCTL_PATH" ] && ctl_sha=$(sha256 -q "$STOCK_AWGCTL_PATH")
+    ksha_sha=""
+    [ -f "$STOCK_KSHA_PATH" ] && ksha_sha=$(sha256 -q "$STOCK_KSHA_PATH")
+
+    # Restore the stock pair using the validated hashes
+    if ! restore_generation_pair "$STOCK_BSD_PATH" "$STOCK_IFCFG_PATH" \
+            "$STOCK_IFAWG_PATH" "$STOCK_AWGCTL_PATH" \
+            "$bsd_sha" "$ifc_sha" "$hdr_sha" "$ctl_sha" \
+            "$STOCK_KSHA_PATH" "$ksha_sha"; then
+        die "stock baseline restoration failed (state: ${RESTORE_STATE:-nothing written}): recovery data preserved at $INSTALL_DB"
+    fi
+
+    log "Stock baseline restored (generation 1: $BSD_FILE + $IFCFG_FILE + $IFAWG_HEADER + $AWGCTL_FILE + $KERNEL_SHA256)"
+
+    # Restore non-pair artifacts from pre-install inventory (best effort)
+    restore_preinstall_inventory || log "Pre-install inventory restore had warnings (see above)"
+
+    # Remove all backup generations (now that stock is live)
+    remove_all_backup_generations
+
+    # Remove the manifest and fsync helper (the install DB record)
+    rm -f "$MANIFEST" || die "cannot remove $MANIFEST"
+    [ -f "$FSYNC_HELPER" ] && rm -f "$FSYNC_HELPER" || true
+
+    # R7: the lock and its immutable claim/release history are kept
+    log "Uninstalled: stock baseline restored, AWG artifacts removed (lock history kept at $LOCKFILE)"
 }
 
 # Report what an install would do and stop. Nothing is written, so this is safe
 # to run on a production box before a maintenance window.
 check_plan() {
     local rc=0 key ver ifcfg_ver m_tag m_v m_bsd m_ifc bsd_sha ifc_sha trust v
+    local want_k r_state r_count r_rec
 
     step "Pre-flight check"
     ver=$(uname -r)
@@ -1389,14 +2414,15 @@ check_plan() {
         # KARL relinks /bsd at boot, so the hash of a correctly installed kernel
         # changes legitimately. Integrity is /var/db/kernel.SHA256's job; the
         # manifest hash is only meaningful before the first reboot.
-        if [ -f "$KERNEL_SHA256" ]; then
-            want_k=$(awk '/^SHA256 \(\/bsd\)/ { print $NF }' "$KERNEL_SHA256" 2>/dev/null)
-            if [ -n "$want_k" ] && [ "$bsd_sha" = "$want_k" ]; then
-                printf 'kernel sha256 : matches %s\n' "$KERNEL_SHA256"
-            else
-                printf 'kernel sha256 : MISMATCH against %s (%s)\n' "$KERNEL_SHA256" "${want_k:-unreadable}"
-                rc=1
-            fi
+        want_k=$(kernel_db_sha)
+        if [ -n "$want_k" ] && [ "$bsd_sha" = "$want_k" ]; then
+            printf 'kernel sha256 : matches %s\n' "$KERNEL_SHA256"
+        elif [ -n "$want_k" ]; then
+            printf 'kernel sha256 : MISMATCH against %s (%s)\n' "$KERNEL_SHA256" "$want_k"
+            rc=1
+        elif [ -n "$KERNEL_SHA256" ] && [ -f "$KERNEL_SHA256" ]; then
+            printf 'kernel sha256 : %s records no SHA256 (%s) entry\n' "$KERNEL_SHA256" "$BSD_FILE"
+            rc=1
         elif [ -n "$m_bsd" ] && [ "$bsd_sha" = "$m_bsd" ]; then
             printf 'kernel sha256 : matches manifest\n'
         else
@@ -1404,6 +2430,22 @@ check_plan() {
         fi
         if [ -n "$m_bsd" ] && [ -n "$bsd_sha" ] && [ "$bsd_sha" != "$m_bsd" ]; then
             printf 'relink        : /bsd differs from the staged kernel (KARL relink, expected after boot)\n'
+        fi
+        # F9: is the boot-time relink actually able to run? A custom kernel with
+        # an empty relink directory fails at every boot with
+        # "reorder_kernel: failed" and nothing in the installer reported it.
+        r_state=$(relink_state_now)
+        r_count=$(relink_object_count)
+        r_rec=$(manifest_get "$MANIFEST" relink_state)
+        if [ "$r_state" = present ]; then
+            printf 'relink objects: present (%s objects at %s)\n' "$r_count" "$(relink_dir)"
+        elif [ "$r_rec" = skipped ]; then
+            printf 'relink objects: not installed (--skip-relink-objects): reorder_kernel will fail at boot\n'
+        elif [ "$r_rec" = present ]; then
+            printf 'relink objects: MISSING at %s but the manifest recorded them — rerun --kernel-only\n' "$(relink_dir)"
+            rc=1
+        else
+            printf 'relink objects: not present at %s (install with --kernel-only to enable boot relink)\n' "$(relink_dir)"
         fi
         ifc_sha=$(sha256 -q "$IFCFG_FILE" 2>/dev/null || true)
         if [ -n "$m_ifc" ] && [ "$ifc_sha" = "$m_ifc" ]; then
@@ -1518,8 +2560,8 @@ setup_pf_mss() {
 
 usage() {
     cat <<EOF
-Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | --all]
-          [--pf] [--rollback-kernel-only] [--allow-root-build]
+Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | --all | --uninstall]
+          [--pf] [--rollback-kernel-only] [--allow-root-build] [--purge-configs] [--skip-relink-objects]
 
   --check        Report what would be done and stop (nothing is changed)
   --tools-only   Patched ifconfig (+ ifconfig.8) + net/if_awg.h + awg-quick;
@@ -1533,17 +2575,72 @@ Usage: $0 [--tools-only | --kernel-only | --build-only | --rollback | --check | 
                  With --rollback: restore /bsd only and leave /sbin/ifconfig
                  as-is. Unsafe: the kernel and its management tool may not
                  match; use it when only the ifconfig backup is missing.
+  --uninstall    Restore the original stock baseline (generation 1) via the
+                 paired rollback machinery, then remove AWG artifacts
+                 (awg-quick, awgctl.8, all .awg-prev generations, config
+                 directory, install DB record). The R7 lock history is kept.
+                 Fails closed if the stock baseline cannot be authenticated.
   --allow-root-build
                  Compile as root instead of the build user. Recovery only:
                  the tree is then writable by other accounts (AWG-014).
+  --purge-configs
+                 With --uninstall: also remove the config directory and its
+                 contents even when it existed pre-install. Default: preserve
+                 user configs.
   --pf           Also add the MSS clamp rule to an existing /etc/pf.conf
                  (default: print the rule and leave the firewall alone)
+  --skip-relink-objects
+                 Do not install the KARL relink objects (default: install
+                 them). Only for a host with no room under /usr: without them
+                 the boot-time reorder_kernel fails and /bsd is never relinked.
+                 Recorded in the manifest; --check reports it.
+
+Disk space (F10). Measured on OpenBSD 8.0/amd64 with the AWG.MP config: the
+kernel object directory is ~700 MB-1 GB and the KARL relink set
+/usr/share/relink/kernel/<ident> is 2486 objects / 677 MB — the relink set is
+a near-copy of the objects, not a small subset. An upgrade needs room for both
+sets at once (the previous one is kept as <ident>.awg-prev.<generation> until
+the next generation commits), so budget ~2.2 GB on the filesystem holding
+/usr/share/relink, plus the same order for the object directory. The installer
+prints the free space before compiling and refuses to publish a relink set
+when less than its size plus 100 MB is available; --skip-relink-objects is the
+documented way out on a host that cannot meet that.
 
 Environment:
   AWG_BUILD_USER   Account that runs config/make (default: _awgbuild).
-                   Create it with: useradd -s /sbin/nologin _awgbuild
+                   Create it with:  useradd -s /sbin/nologin _awgbuild
+                   On stock 8.0 /usr/obj is build:wobj 0770, so that account
+                   cannot create the object directory config(8) asks for. The
+                   installer changes no mode: it adds the account to the group
+                   that owns /usr/obj (wobj, the group that exists for exactly
+                   this) and, if that is not enough, pre-creates
+                   /usr/obj/sys/arch/amd64/compile and hands only that subtree
+                   to the builder. Point the build elsewhere with
+                   BSDOBJDIR=<dir> (or build with --allow-root-build on a
+                   throwaway machine).
+  SRCDIR           Kernel source root (default: /usr/src/sys). A redirect to
+                   another filesystem is supported; its parent must be owned by
+                   root or AWG_BUILD_USER and not group/other writable, /usr/src
+                   may be a symlink (it is followed and checked), and a missing
+                   parent is created before the signed archive is extracted.
+  IFCFG_SRC        ifconfig source directory (default: /usr/src/sbin/ifconfig).
   AWG_RELEASE_TAG  Release tag recorded in the backup manifest (default: git
                    describe of the repo, else "unknown")
+
+Disk space (F10):
+  The kernel object directory needs ~1 GB and the KARL relink set in
+  /usr/share/relink/kernel/AWG.MP another ~700 MB; the previous relink set is
+  kept (by rename) as .../AWG.MP.awg-prev.<gen> until the next generation
+  commits, so plan ~2 GB free on the filesystem holding /usr. The installer
+  checks the free space before it copies the objects and refuses with the
+  numbers when they do not fit.
+
+Verifying a kernel by hand (F1):
+  sha256 -h HASHFILE FILE writes the hash into HASHFILE. \`sha256 -h /bsd\` is
+  NOT a read: -h names the output file, so it overwrites /bsd with a hash line
+  and leaves the machine unbootable. To read a kernel hash use:
+      sha256 -q /bsd
+      sha256 -C /var/db/kernel.SHA256 /bsd      # verify against the DB
 
 The kernel is staged and verified before /bsd is replaced. The kernel,
 /sbin/ifconfig, the driver header, awgctl and the kernel integrity DB
@@ -1566,6 +2663,7 @@ EOF
 
 MODE=all
 EDIT_PF=no
+PURGE_CONFIGS=no
 for arg in "$@"; do
     case "$arg" in
         --tools-only)          MODE=tools ;;
@@ -1574,9 +2672,12 @@ for arg in "$@"; do
         --rollback)            MODE=rollback ;;
         --check)               MODE=check ;;
         --all)                 MODE=all ;;
+        --uninstall)           MODE=uninstall ;;
         --pf)                  EDIT_PF=yes ;;
         --rollback-kernel-only) ROLLBACK_KERNEL_ONLY=yes ;;
         --allow-root-build)    ALLOW_ROOT_BUILD=yes ;;
+--purge-configs)       PURGE_CONFIGS=yes ;;
+        --skip-relink-objects) RELINK_SKIP=yes ;;
         -h|--help)             usage ;;
         *) die "Unknown option: $arg. Run $0 --help for usage." ;;
     esac
@@ -1584,14 +2685,21 @@ done
 
 check_root
 acquire_lock
-resolve_build_user
 : > "$LOGFILE"
+
+# resolve_build_user is only needed for build modes. --uninstall, --check,
+# --rollback, --rollback-kernel-only do not compile anything.
+case "$MODE" in
+    tools|kernel|build|all)
+        resolve_build_user
+        ;;
+esac
 
 case "$MODE" in
     tools)
         prepare_durability_helper
+        snapshot_precommit_manifest
         write_backup_pair
-        cp "$MANIFEST" "$WORK/precommit.manifest" || die "cannot save precommit manifest"
         PUBLISH_STARTED=yes
         trap 'publish_interrupted' HUP INT TERM
         install_packages
@@ -1607,14 +2715,16 @@ case "$MODE" in
         ;;
     kernel)
         prepare_durability_helper
+        snapshot_precommit_manifest
         write_backup_pair
         fetch_sys_sources
         kernel_build
-        cp "$MANIFEST" "$WORK/precommit.manifest" || die "cannot save precommit manifest"
         PUBLISH_STARTED=yes
         trap 'publish_interrupted' HUP INT TERM
         publish_header
-        kernel_publish
+        kernel_publish || publish_abort "kernel publish failed"
+        # F9: the relink objects are part of the kernel publish.
+        publish_relink_objects || publish_abort "KARL relink objects publish failed"
         record_installed_pair
         PUBLISH_STARTED=no
         trap - HUP INT TERM
@@ -1626,6 +2736,9 @@ case "$MODE" in
         ;;
     rollback)
         rollback_pair
+        ;;
+    uninstall)
+        uninstall_all
         ;;
     check)
         check_plan

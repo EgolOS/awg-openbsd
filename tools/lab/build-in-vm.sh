@@ -4,10 +4,13 @@ set -e
 HOST=${LABHOST:-10.0.2.2:8000}
 LABDIR=${LABDIR:-/lab}
 BUILD=/home/build
+# One private fixture root per run (mktemp, not a fixed /tmp/awgfix) so two
+# builds in the same guest never overwrite each other's tarballs.
+FIX=$(mktemp -d "${TMPDIR:-/tmp}/awgfix.XXXXXX")
 
 echo "== fixtures =="
 df -h /home /usr | tail -3
-mkdir -p /tmp/awgfix && cd /tmp/awgfix
+mkdir -p "$FIX" && cd "$FIX"
 for f in sys80.tar.gz driver.tgz; do
 	[ -f "$f" ] || ftp -V -o "$f" "http://$HOST/$f"
 done
@@ -21,8 +24,8 @@ mkdir -p /usr/src/sbin
 	tar xzf src80.tar.gz -C /usr/src sbin/ifconfig
 }
 
-rm -rf /tmp/awgfix/repo && mkdir -p /tmp/awgfix/repo && tar xzf driver.tgz -C /tmp/awgfix/repo
-R=/tmp/awgfix/repo/awg-openbsd-kernel
+rm -rf "$FIX/repo" && mkdir -p "$FIX/repo" && tar xzf driver.tgz -C "$FIX/repo"
+R="$FIX/repo/awg-openbsd-kernel"
 
 echo "== driver sources =="
 cp "$R"/src/if_awg.h "$R"/src/if_awg.c "$R"/src/awg_noise.c "$R"/src/awg_noise.h "$BUILD/sys/net/"
@@ -33,8 +36,8 @@ if ! grep -q 'pseudo-device awg' "$BUILD/sys/conf/files"; then
 	  /^pseudo-device wg: ifnet$/ { print; print "pseudo-device awg: ifnet"; next }
 	  /^file net\/if_wg\.c/      { print; print "file net/if_awg.c\t\t\tawg"; print "file net/awg_noise.c\t\t\tawg"; next }
 	  { print }
-	' "$BUILD/sys/conf/files" > /tmp/files.new
-	mv /tmp/files.new "$BUILD/sys/conf/files"
+	' "$BUILD/sys/conf/files" > "$FIX/files.new"
+	mv "$FIX/files.new" "$BUILD/sys/conf/files"
 fi
 grep -n 'awg' "$BUILD/sys/conf/files"
 
@@ -45,8 +48,8 @@ if ! grep -q 'wg_cookie\.c.*awg' "$BUILD/sys/conf/files"; then
 	      $2 == "crypto/curve25519.c" || $2 == "crypto/chachapoly.c") &&
 	      $0 !~ /awg/ { print $0 " | awg"; next }
 	  { print }
-	' "$BUILD/sys/conf/files" > /tmp/files2.new
-	mv /tmp/files2.new "$BUILD/sys/conf/files"
+	' "$BUILD/sys/conf/files" > "$FIX/files2.new"
+	mv "$FIX/files2.new" "$BUILD/sys/conf/files"
 fi
 
 echo "== ifconfig =="

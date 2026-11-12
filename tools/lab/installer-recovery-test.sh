@@ -25,8 +25,13 @@ BSD_BAK=/bsd.awg-prev
 IFC_BAK=/sbin/ifconfig.awg-prev
 INSTALL_SH=${INSTALL_SH:-$(dirname "$0")/../../install.sh}
 INSTALL_SH=$(cd "$(dirname "$INSTALL_SH")" && pwd)/$(basename "$INSTALL_SH")
-NEW=/tmp/awg-new-kernel
-STUB_INSTALL=/tmp/awg-stub-install
+# One private work root for the whole rehearsal: the kernel, stub toolchain
+# and per-case logs all live under a fresh mktemp dir, so two runs in
+# parallel never share a name (the old fixed /tmp/awg-* names collided).
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/awg-recovery.XXXXXX") || exit 1
+trap 'rm -rf "$WORK"' EXIT
+NEW=$WORK/awg-new-kernel
+STUB_INSTALL=$WORK/awg-stub-install
 BUILD_USER=${AWG_BUILD_USER:-_awgbuild}
 
 [ -x "$INSTALL_SH" ] || { echo "FAIL: installer not found: $INSTALL_SH" >&2; exit 1; }
@@ -35,7 +40,7 @@ BUILD_USER=${AWG_BUILD_USER:-_awgbuild}
 # Stub toolchain: `config` creates the compile dir, `make` drops a copy of the
 # running kernel in obj/, `install` copies files but fails for ifconfig. This
 # avoids a 40-minute kernel build for the rehearsal.
-STUBDIR=/tmp/awg-stub
+STUBDIR=$WORK/awg-stub
 make_stub() {
 	rm -rf "$STUBDIR"; mkdir -p "$STUBDIR"
 	printf '#!/bin/sh\nmkdir -p ../compile/AWG.MP/obj\nexit 0\n' > "$STUBDIR/config"
@@ -101,63 +106,63 @@ make_stub
 echo "-- seed: backup pair + manifest"
 seed_pair
 echo "-- scenario a: install pair -> rollback -> pair identical"
-snapshot /tmp/awga
+snapshot $WORK/awga
 printf 'new-kernel-bytes\n' > "$BSD"
 printf 'new-ifconfig-bytes\n' > "$IFC"
-sh "$INSTALL_SH" --rollback >/tmp/awga.log 2>&1
-if [ $? -eq 0 ] && same "$BSD" /tmp/awga.bsd && same "$IFC" /tmp/awga.ifc; then
+sh "$INSTALL_SH" --rollback >$WORK/awga.log 2>&1
+if [ $? -eq 0 ] && same "$BSD" $WORK/awga.bsd && same "$IFC" $WORK/awga.ifc; then
 	pass "a: rollback restored /bsd and /sbin/ifconfig from the pair"
 else
-	fail "a: pair not restored (see /tmp/awga.log)"
-	tail -5 /tmp/awga.log
+	fail "a: pair not restored (see $WORK/awga.log)"
+	tail -5 $WORK/awga.log
 fi
 
 # ── b. ifconfig install fails, rollback restores the pair ────────────────────
 echo "-- scenario b: ifconfig install fails -> rollback restores the pair"
-snapshot /tmp/awgb
+snapshot $WORK/awgb
 cp -p "$NEW" "$BSD"
-AWG_STUB_KERNEL="$NEW" PATH="$STUBDIR:$PATH" sh "$INSTALL_SH" --kernel-only >/tmp/awgb.log 2>&1
-sh "$INSTALL_SH" --rollback >/tmp/awgb2.log 2>&1
-if same "$BSD" /tmp/awgb.bsd && same "$IFC" /tmp/awgb.ifc; then
+AWG_STUB_KERNEL="$NEW" PATH="$STUBDIR:$PATH" sh "$INSTALL_SH" --kernel-only >$WORK/awgb.log 2>&1
+sh "$INSTALL_SH" --rollback >$WORK/awgb2.log 2>&1
+if same "$BSD" $WORK/awgb.bsd && same "$IFC" $WORK/awgb.ifc; then
 	pass "b: rollback restored both halves after a failed ifconfig install"
 else
 	fail "b: pair left inconsistent after the failed install"
-	tail -5 /tmp/awgb.log
+	tail -5 $WORK/awgb.log
 fi
 
 # ── c. missing ifconfig backup -> rollback refuses ───────────────────────────
 echo "-- scenario c: ifconfig backup removed -> rollback refuses"
-snapshot /tmp/awgc
+snapshot $WORK/awgc
 printf 'new-kernel-bytes\n' > "$BSD"
 rm -f "$IFC_BAK"
-sh "$INSTALL_SH" --rollback >/tmp/awgc.log 2>&1
-if [ $? -ne 0 ] && grep -q 'rollback-kernel-only' /tmp/awgc.log; then
+sh "$INSTALL_SH" --rollback >$WORK/awgc.log 2>&1
+if [ $? -ne 0 ] && grep -q 'rollback-kernel-only' $WORK/awgc.log; then
 	pass "c: rollback refused and named --rollback-kernel-only"
 else
 	fail "c: rollback did not refuse with the documented error"
-	tail -5 /tmp/awgc.log
+	tail -5 $WORK/awgc.log
 fi
-sh "$INSTALL_SH" --rollback --rollback-kernel-only >/tmp/awgc2.log 2>&1
-if [ $? -eq 0 ] && same "$BSD" /tmp/awgc.bsd; then
+sh "$INSTALL_SH" --rollback --rollback-kernel-only >$WORK/awgc2.log 2>&1
+if [ $? -eq 0 ] && same "$BSD" $WORK/awgc.bsd; then
 	pass "c: --rollback-kernel-only restored /bsd alone"
 else
 	fail "c: --rollback-kernel-only did not restore /bsd"
-	tail -5 /tmp/awgc2.log
+	tail -5 $WORK/awgc2.log
 fi
 
 # ── d. truncated /bsd.awg-prev -> refused, /bsd untouched ────────────────────
 echo "-- scenario d: truncated /bsd.awg-prev -> refused, /bsd untouched"
-snapshot /tmp/awgd
+snapshot $WORK/awgd
 dd if="$NEW" of="$BSD_BAK" bs=1 count=4096 2>/dev/null
 bsd_before=$(sha256 -q "$BSD")
-sh "$INSTALL_SH" --rollback >/tmp/awgd.log 2>&1
+sh "$INSTALL_SH" --rollback >$WORK/awgd.log 2>&1
 rc=$?
 bsd_after=$(sha256 -q "$BSD")
 if [ $rc -ne 0 ] && [ "$bsd_before" = "$bsd_after" ]; then
 	pass "d: truncated backup refused, $BSD sha256 unchanged"
 else
 	fail "d: $BSD changed or the refusal was not reported"
-	tail -5 /tmp/awgd.log
+	tail -5 $WORK/awgd.log
 fi
 
 # ── e. untrusted source tree -> build refused ────────────────────────────────
@@ -166,30 +171,30 @@ TREE=${SRCDIR:-/usr/src/sys}
 [ -d "$TREE" ] || TREE=/usr/src
 tree_before=$(stat -f '%Su %Sp' "$TREE")
 chmod g+w "$TREE"
-sh "$INSTALL_SH" --build-only >/tmp/awge.log 2>&1
+sh "$INSTALL_SH" --build-only >$WORK/awge.log 2>&1
 rc=$?
 tree_after=$(stat -f '%Su %Sp' "$TREE")
-if [ $rc -ne 0 ] && grep -q 'untrusted source tree' /tmp/awge.log; then
+if [ $rc -ne 0 ] && grep -q 'untrusted source tree' $WORK/awge.log; then
 	pass "e: build refused for a group-writable tree ($tree_after)"
 else
 	fail "e: build was not refused (rc=$rc, $tree_after)"
-	tail -5 /tmp/awge.log
+	tail -5 $WORK/awge.log
 fi
 chmod g-w "$TREE"
 
 # ── f. --check reports the pair, the build user and the trust verdict ────────
 echo "-- scenario f: --check reports pair, build user and trust"
-sh "$INSTALL_SH" --check >/tmp/awgf.log 2>&1
+sh "$INSTALL_SH" --check >$WORK/awgf.log 2>&1
 rc=$?
-if grep -q 'build user' /tmp/awgf.log && grep -q 'src trust' /tmp/awgf.log \
-   && grep -q 'ifconfig sha' /tmp/awgf.log && grep -q 'ifconfig awg' /tmp/awgf.log; then
+if grep -q 'build user' $WORK/awgf.log && grep -q 'src trust' $WORK/awgf.log \
+   && grep -q 'ifconfig sha' $WORK/awgf.log && grep -q 'ifconfig awg' $WORK/awgf.log; then
 	pass "f: --check printed pair, trust and build user (rc=$rc)"
 else
 	fail "f: --check output incomplete (rc=$rc)"
-	cat /tmp/awgf.log
+	cat $WORK/awgf.log
 fi
 
-rm -f "$NEW" "$STUB_INSTALL" /tmp/awga* /tmp/awgb* /tmp/awgc* /tmp/awgd* /tmp/awge* /tmp/awgf*
+rm -f "$NEW" "$STUB_INSTALL" $WORK/awga* $WORK/awgb* $WORK/awgc* $WORK/awgd* $WORK/awge* $WORK/awgf*
 echo ""
 if [ "$FAILS" -eq 0 ]; then echo "installer-recovery: all scenarios passed"; exit 0; fi
 echo "installer-recovery: $FAILS scenario(s) failed"; exit 1

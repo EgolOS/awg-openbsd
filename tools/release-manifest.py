@@ -4,7 +4,8 @@
 Collects the provenance of one release into a JSON document: which OpenBSD
 release the kernel was built for, which driver commit produced it, the sha256
 and size of the kernel artefact, the sha256 of the generated awg-openbsd.patch
-and of the userspace tools (awg-quick, the ifconfig patch), the recorded test
+patch and of the userspace tools (awg-quick, the ifconfig patch, the awgctl
+source), the recorded test
 results, the build host and a UTC timestamp. The JSON goes to stdout and, with
 --out, to a file.
 
@@ -33,7 +34,12 @@ SCHEMA_VERSION = 1
 # documented way to apply the driver, the two tool files are what userspace
 # runs. Paths are relative to the repository root.
 PATCH_REL = "awg-openbsd.patch"
-TOOLS_REL = ("sbin/awg-quick", "sbin/ifconfig/ifconfig_awg.patch")
+# E2-HYGIENE: awgctl ships with the release (install.sh --all builds it and
+# publishes it with its awgctl.8 man page, docs/ADMIN-INTERFACE.md), so the
+# manifest pins it next to awg-quick and the ifconfig patch. The sbin/awgctl
+# build directory (obj/) is build output, not a shipped file.
+TOOLS_REL = ("sbin/awg-quick", "sbin/ifconfig/ifconfig_awg.patch",
+             "sbin/awgctl/awgctl.c")
 
 # Fallback repository root: the current directory, so the tool works when it is
 # run from the checkout root or with --repo. No absolute personal path here.
@@ -179,7 +185,7 @@ def run_self_test():
               and reparsed["version"] == "test"
               and reparsed["driver_commit"] == "deadbeef")
         check("patch sha256 recorded", len(reparsed["patch"]["sha256"]) == 64)
-        check("both tool hashes recorded",
+        check("all tool hashes recorded (awg-quick, ifconfig patch, awgctl)",
               len(reparsed["tools"]) == len(TOOLS_REL)
               and all(len(t["sha256"]) == 64 for t in reparsed["tools"]))
         check("tests parsed", reparsed["tests"] == {"smoke": "pass"})

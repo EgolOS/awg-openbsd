@@ -18,9 +18,11 @@ import ipaddress
 import os
 import sys
 
-STATE = os.environ.get("AWGFIX_STATE", "/tmp/awgctl-fixture.state")
+STATE = os.environ.get("AWGFIX_STATE") or os.path.join(
+    os.environ.get("TMPDIR", "/tmp"), "awgctl-fixture.state")
 LOG = os.environ.get("AWGFIX_IFC_LOG")
-ROUTES = os.environ.get("AWGFIX_ROUTES", "/tmp/awgctl-fixture.routes")
+ROUTES = os.environ.get("AWGFIX_ROUTES") or os.path.join(
+    os.environ.get("TMPDIR", "/tmp"), "awgctl-fixture.routes")
 
 
 def read():

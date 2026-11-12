@@ -103,22 +103,46 @@ python3 tools/upstream-diff.py --tree ./upstream-8.0    # from a fetched sys tre
 Do this in a scratch copy, never in the tree a running server builds from.
 
 1. Fetch and verify the new `sys.tar.gz` (§1). Unpack it somewhere writable.
-2. Record the new manifest: copy `tools/upstream/8.0.sha256` to
-   `<new>.sha256`, update the header, and recompute the digests of the files that
-   still exist. A file that disappeared upstream is a finding, not a nuisance.
-3. `python3 tools/upstream-diff.py --tree <new tree> --release <new>`.
+2. Re-vendor the stock `kern_pledge.c`: copy the new tree's
+   `sys/kern/kern_pledge.c` over `src/kern_pledge.c.orig`, then re-apply the
+   AWG edit to that stock file to produce `src/kern_pledge.c` (the
+   `net/if_awg.h` include plus the `SIOCSAWG`/`SIOCGAWG` cases in the
+   `PLEDGE_INET` ioctl group, AWG-038). The two hunks come from the current
+   `awg-openbsd.patch`; apply them with `patch -p0 -F 0` and fix the context
+   by hand where the release moved lines.
+3. Record the new manifest: copy `tools/upstream/8.0.sha256` to
+   `<new>.sha256`, update the header, and recompute the digests of the files
+   that still exist — including **both** `kern/kern_pledge.c` (the new stock
+   `.orig`) and `kern/kern_pledge.c.awg` (the patched copy). A file that
+   disappeared upstream is a finding, not a nuisance.
+4. Regenerate the patch artifact: `sh generate-patch.sh`. The
+   `sys/kern/kern_pledge.c` section is a `diff -u` of
+   `src/kern_pledge.c.orig` against `src/kern_pledge.c`, so it only picks up
+   the re-vendored stock once steps 2 and 3 are done.
+5. `make check-upstream` (part of `make check`) must be green in the same
+   commit: it compares the recorded digest, the vendored pair and the patch
+   hunk (§9). Steps 2–5 are one commit; a baseline move that refreshes only
+   some of them is exactly what the gate rejects.
+6. `python3 tools/upstream-diff.py --tree <new tree> --release <new>`.
    A `MISMATCH` on the *old* manifest is expected here — it tells you the tree
    changed; the function report is what matters.
-4. Read the upstream diff for the functions listed as `modified`. For each:
+7. Read the upstream diff for the functions listed as `modified`. For each:
    - identical copy upstream and downstream → take the upstream body verbatim;
    - small AWG delta → re-apply the delta on top of the new body;
    - large delta → re-implement the AWG part against the new structure. Do not
      paste the old body over a changed upstream function.
-5. `python3 tools/sync-check.py` for the same comparison across all files
+8. `python3 tools/sync-check.py` for the same comparison across all files
    registered in `conf/files`.
-6. Rebuild in a lab VM (`install.sh --all`), run `make check-vm`, and only then
+9. Rebuild in a lab VM (`install.sh --all`), run `make check-vm`, and only then
    record the new baseline as supported in README/docs.
-7. Update this document: new row in §1, new divergence table in §3.
+10. Update this document: new row in §1, new divergence table in §3.
+
+Only `kern_pledge.c` is vendored as a stock/patched pair. `sbin/ifconfig/ifconfig.c`
+and `conf/files` refresh differently: the installer patches the release's own
+`ifconfig.c` with `sbin/ifconfig/ifconfig_awg.patch` and edits `conf/files`
+with `awk` text-matching, so moving the baseline changes only the recorded
+digests for those two — no vendored copy to re-vendor, and the existing
+`ifconfig_awg.patch` is reused as long as its context still applies.
 
 ## 5. What to watch upstream
 
@@ -146,7 +170,10 @@ State only what has been built and tested:
 | 7.9 amd64 | compiles (`-Werror` clean, per project history) | no |
 
 `-current` is not tracked automatically. It is worth a compile per release
-cycle to see the breakage early, but it never becomes a baseline.
+cycle to see the breakage early, but it never becomes a baseline. The
+2026-11-10 probe (§8) measured the current `-current` against 8.0: zero
+delta on every file the port touches, so a `-current` kernel build today
+needs the same patch, with no hunk re-flow.
 
 ## 7. Known weaknesses in this process
 
@@ -162,3 +189,89 @@ cycle to see the breakage early, but it never becomes a baseline.
 - There is no automated test for the userspace half of the ioctl contract. A
   struct-layout mismatch between kernel and `ifconfig` is caught only by the
   handshake test after an install.
+
+## 8. `-current` probe, measured 2026-11-10 (E2-UPSTREAM)
+
+Sources fetched read-only for this probe:
+
+| Tree | Source | Revision evidence |
+| --- | --- | --- |
+| 8.0-release | `https://cdn.openbsd.org/pub/OpenBSD/8.0/sys.tar.gz` + `src.tar.gz` | CVS Ids below |
+| `-current` | `https://raw.githubusercontent.com/openbsd/src/master/…` (GitHub mirror of anoncvs) | master @ `6689907bdb0b0941e9e0ae76ba0f035b647f3f78`, 2026-11-09T20:41:35Z |
+
+The fetch was re-run in the review round on 2026-11-10 (same day): the GitHub
+`master` API returned the same `6689907b…` commit, all 13 files fetched with
+rc 0, and every `sha256sum` and `$OpenBSD:` Id line below matched — the
+per-file command output is `evidence/e2-upstream/upstream-fetch.log`.
+
+Every one of the 13 files the installer touches is **byte-identical**
+between the two trees (SHA-256 equal, not just the recorded digest), so
+there is no context shift to carry:
+
+| File | CVS revision (both trees) | 8.0 vs -current |
+| --- | --- | --- |
+| `net/if_wg.c` | 1.50, 2026-09-20, mvs | identical |
+| `net/if_wg.h` | 1.7, 2025-07-10, dlg | identical |
+| `net/wg_noise.c` | 1.8, 2025-10-27, mvs | identical |
+| `net/wg_noise.h` | 1.3, 2024-03-05, mvs | identical |
+| `net/wg_cookie.c` | 1.5, 2023-08-18, jsg | identical |
+| `net/wg_cookie.h` | 1.2, 2020-12-09, tb | identical |
+| `crypto/blake2s.c` | 1.3, 2023-02-03, miod | identical |
+| `crypto/curve25519.c` | 1.2, 2020-07-22, tobhe | identical |
+| `crypto/chachapoly.c` | 1.6, 2020-07-22, tobhe | identical |
+| `crypto/chacha_private.h` | 1.4, 2020-07-22, tobhe | identical |
+| `conf/files` | 1.752, 2026-03-16, claudio | identical |
+| `kern/kern_pledge.c` | 1.369, 2026-09-21, jan | identical |
+| `sbin/ifconfig/ifconfig.c` | 1.482, 2026-07-13, dlg | identical |
+
+Patch application against both trees (GNU `patch`, fuzz 0, dry run):
+
+- `awg-openbsd.patch` — the five real sections apply cleanly on 8.0 and on
+  `-current` (rc 0): the four new `net/` files and the two
+  `sys/kern/kern_pledge.c` hunks (PLEDGE_INET ioctl group + `net/if_awg.h`
+  include, AWG-038). The `sys/conf/files` block is not a unified-diff hunk:
+  it is a text-match block (`@@ pseudo-device wg: ifnet`, no line numbers)
+  that GNU `patch` skips while exiting 0, which is why the dry run prints
+  exactly five `checking file` lines. `install.sh` applies it with `awk`
+  text-matching, and its anchors are present in both trees because the file
+  is byte-identical — the digest equality is the evidence, not `patch`.
+- `sbin/ifconfig/ifconfig_awg.patch` — 8/8 hunks apply cleanly on both
+  (rc 0). `install.sh` uses `patch -C -F 0` on OpenBSD, the strictest mode;
+  the recorded `sbin/ifconfig/ifconfig.c` digest in
+  `tools/upstream/8.0.sha256` matches the fetched 8.0 file.
+
+Consequence: no upstream change touches the patched functions
+(`wg_ioctl_set`/`get`, `awg_encap`/`input`/`handshake`, `pledge_inet`,
+the ifconfig `wg` keyword block) between 8.0 and today's `-current`; the
+divergence table in §3 is current for both trees. Raw command output:
+`evidence/e2-upstream/` (`upstream-fetch.log` — the per-file `curl` with
+`sha256sum` and the `$OpenBSD:` Id line behind the table above,
+`patch-8.0.out`, `patch-current.out`, `ifcfg-8.0.out`, `ifcfg-current.out`,
+`conffiles-8.0.awged` / `conffiles-current.awged` — the `awk` result on the
+fetched `conf/files`, `upstream-probe.log`).
+
+## 9. Automated digest-drift gate
+
+`make check-upstream` runs `tools/upstream-digest-check.py`, which fails
+(rc 1) when the recorded digest and the vendored stock stop agreeing:
+
+1. `sha256(src/kern_pledge.c.orig)` must equal the manifest's
+   `kern/kern_pledge.c` entry.
+2. `sha256(src/kern_pledge.c)` must equal the manifest's
+   `kern/kern_pledge.c.awg` entry.
+3. Applying the `sys/kern/kern_pledge.c` hunk of `awg-openbsd.patch` to
+   the stock file must reproduce `src/kern_pledge.c` byte-for-byte, so the
+   patch artifact, the stock file and the recorded digest describe one
+   edit.
+
+It is repo-only (no network), part of `make check` alongside
+`check-patch`, and covered by `tools/tests/test_upstream_digest_check.py`
+(passes at HEAD; fails on simulated drift of the stock, the patched copy,
+the manifest, or the patch artifact). The gate compares only the
+`kern_pledge.c` pair; the other manifest entries (`if_wg.c`, the `wg_*`
+helpers, `sbin/ifconfig/ifconfig.c`, `conf/files`) have no vendored
+comparison target, so it detects a half-done baseline move, not an upstream
+change by itself. When §4 moves the baseline, the re-vendored
+`src/kern_pledge.c.orig` + `src/kern_pledge.c` pair, the new
+`<release>.sha256` and a `sh generate-patch.sh` regeneration are the same
+commit: the gate fails until all three are refreshed.

@@ -16,12 +16,18 @@ AWG parameters are configured directly through `ifconfig(8)` — the same tool u
 **READY FOR A RELEASE CANDIDATE**, with the claims narrowed to what was actually
 executed. Verified on disposable OpenBSD 8.0 amd64 guests: an unprivileged kernel
 build from signature-verified sources boots and passes the repository gates; the
-tunnel interoperates with the official `amneziawg-go` in both directions for the
-legacy profile and for 3.1 (S3/S4 + header protection) with hash-verified 8 MiB
-payloads; the installer separates build from install (AWG-014) and restores
+tunnel's interoperability with the official `amneziawg-go` is a historical
+narrow pass on record in the engineering report §11.3/§11.4 (both directions,
+legacy profile and 3.1 S3/S4 + header protection, hash-verified 8 MiB payloads;
+not re-run at this pin), alongside the retained OpenBSD↔OpenBSD lab run with
+4 MiB payloads (`test/network-matrix` @ `25dc854` ledgers); the
+installer separates build
+from install (AWG-014) and restores
 `/bsd` + `/sbin/ifconfig` as a pair (AWG-029), rehearsed across six failure
 scenarios. Not verified and not claimed: Android/Windows clients, the Linux
-kernel module, IPv6 tunnel traffic, roaming/NAT/MTU matrices, long soak and fuzz,
+kernel module, IPv6 tunnel traffic, roaming/NAT/MTU matrices, long soak,
+coverage-guided fuzz beyond the bounded config-parser campaign
+(5 493 records, `e2/config-fuzz-r8`),
 and 1-vCPU throughput figures. Evidence and the full gate table:
 [the engineering report](docs/ENGINEERING-REPORT.md).
 The following install commands are for a disposable lab, not a remote-only server.
@@ -430,7 +436,7 @@ Optional HP keystream KAT: `OPENBSD_SYS_TREE=/verified/sys make check-tests`.
 
 | Command | What it proves |
 | --- | --- |
-| `make check` | syntax, Python compile, offline security regressions, the compiled-C integration gate plus its fail-closed sensitivity campaign (`make check-cgate` → `tools/lab/gate-controls.py`, 1 green + 26 negative controls, and `tools/lab/oracle-controls.sh` C1–C24), publish scan, generated patch freshness; signature fixture skips explicitly if signify is absent |
+| `make check` | syntax, Python compile, offline security regressions, the compiled-C integration gate plus its fail-closed sensitivity campaign (`make check-cgate` → `tools/lab/gate-controls.py`, 1 green + 26 negative controls, and `tools/lab/oracle-controls.sh` C1–C24), publish scan, generated patch freshness, upstream digest-drift gate (`make check-upstream` against `tools/upstream/8.0.sha256`); signature fixture skips explicitly if signify is absent |
 | `make check-vm` | four gates in one VM: `smoke-test` (lifecycle, handshake, malformed input), `wire-test`, `matrix-test` (every parameter at its bound), `stress-test` (200 version switches under traffic) |
 | `make check-interop` | two VMs, real link: 3.1 handshake, ICMP through the tunnel, 8 MiB transfer, counters |
 | `make baseline TREE=/usr/src/sys` | function-level divergence against a stock OpenBSD tree, checked against the recorded baseline |

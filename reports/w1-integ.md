@@ -12,12 +12,12 @@ all five failures in `tools/tests/test_installer_r6_staging.py`, each
 
 | Item | Verdict | Command |
 | --- | --- | --- |
-| Repro + script log captured | **PASS** | `python3 -m unittest tools.tests.test_installer_r6_staging -v` + `sh -x install.sh --tools-only` with the test's own `env()`/`run_install()` env, sandbox kept on disk |
+| Repro + script log captured | **PASS** | `python3 -m unittest tools.tests.test_installer_r6_staging -v` + `sh -x install.sh --tools-only` with the test's own `env()`/`run_install()` env, sandbox kept on disk (historical: from other branch) |
 | Failing command named | **PASS** | `ln -s <sandbox>/gen-1 <sandbox>/lock.cas.1` → `ln: failed to create symbolic link './gen-1': File exists` (rc 1) |
 | Cause named (no test weakened) | **PASS** | merged `install.sh` lock publication × the `feat/awgctl` `ln` shim operand order; tests untouched |
 | Fix | **PASS** | `tools/tests/shims/ln` passes flags + operands through; `gen-1` untracked + gitignored; `reports/w1-r6a-repro.py` ROOT from `__file__` |
-| `python3 -m unittest tools.tests.test_installer_r6_staging -v` | **PASS** | `Ran 5 tests … OK` |
-| `python3 -m unittest tools.tests.test_installer_r5_lock -v` | **PASS** | `Ran 10 tests … OK` |
+| `python3 -m unittest tools.tests.test_installer_r6_staging -v` | **PASS** | `Ran 5 tests … OK` (historical: from other branch) |
+| `python3 -m unittest tools.tests.test_installer_r5_lock -v` | **PASS** | `Ran 10 tests … OK` (historical: from other branch) |
 | `make check-tests` | **PASS** | `Ran 85 tests … OK (skipped=1)` |
 | `make check` | **PASS** | exit 0 — `SELF-TEST: ok`, `files scanned: 139`, `RESULT: clean`, `publish scan: clean`, `awg-openbsd.patch is up to date`, `repository checks: OK` |
 
@@ -30,7 +30,7 @@ repeated under `sh -x` (`repro_x.py`) to get the command trace. All five tests
 fail at the same point, before any staging work:
 
 ```
-$ python3 -m unittest tools.tests.test_installer_r6_staging -v
+$ python3 -m unittest tools.tests.test_installer_r6_staging -v  # historical: from other branch
 …
 AssertionError: 1 != 0 :            # empty stderr
 $ cat /tmp/awg-install-log.p2pUcX
@@ -79,7 +79,7 @@ that it then renames over the canonical name, so the basename link collides with
 the generation directory `mkdir` just created: EEXIST → `publish_lock_owner`
 returns 1 → `acquire_lock` dies "reclaimed" before `stage_header()` runs. That
 is why the five staging tests are red while the lock lane's own ten tests stay
-green: `test_installer_r5_lock.py` writes its own `mkdir`/`mv`/`ps`/`stat`/`id`
+green: `test_installer_r5_lock.py` writes its own `mkdir`/`mv`/`ps`/`stat`/`id`  # historical: from other branch
 shims into its temp dir and takes `ln` from the real `PATH`, so it never uses the
 swapped shim.
 

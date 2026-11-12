@@ -22,6 +22,7 @@
 .Ar name
 .Nm
 .Cm show
+.Oo Fl j Oc
 .Oo Ar name Oc
 .Nm
 .Cm set
@@ -90,8 +91,10 @@ stripped before the comparison and ignored.
 Remove all peers, bring
 .Ar name
 down and destroy the interface.
-.It Cm show Oo Ar name Oc
+.It Cm show Oo Fl j Oc Oo Ar name Oc
 Print the current kernel state, one field per line, in a stable order:
+.Ic awgstate ,
+.Ic awgmtu ,
 .Ic awgport ,
 .Ic awgrtable ,
 .Ic awgpubkey ,
@@ -122,6 +125,119 @@ Without
 every
 .Ic awg Ns Ar N
 interface is shown.
+.Pp
+Every field is read from the kernel:
+.Ic awgstate
+and
+.Ic awgmtu
+come from the
+.Dv AF_LINK
+entry of
+.Xr getifaddrs 3
+(the kernel's if_data for the interface), everything else from the
+.Dv SIOCGAWG
+reply.
+A field the kernel does not hold is never printed: an unset interface flag
+prints nothing, a peer that never handshaked has no handshake line, and an
+interface whose if_data the kernel did not hand over prints no MTU.
+.Pp
+With
+.Fl j
+the same state is emitted as one JSON document: an array with one object per
+interface, each holding one record per peer in its
+.Ic peers
+array.
+Key order is fixed, no ANSI escape is written, and no value is derived from
+the clock, so two runs over unchanged kernel state are byte-identical.
+The schema is:
+.Bd -literal -offset indent
+[
+  {
+    "name": "awg0",
+    "state": "up",
+    "mtu": 1420,
+    "awgport": 51820,
+    "awgrtable": 0,
+    "awgpubkey": "base64...",
+    "awgversion": "3.1",
+    "awgjc": 10,
+    "awgjmin": 5,
+    "awgjmax": 15,
+    "awgs1": 1,
+    "awgs2": 2,
+    "awgs3": 3,
+    "awgs4": 4,
+    "awgh1": "100-400",
+    "awgh2": 200,
+    "awgh3": 300,
+    "awgh4": 400,
+    "awgi1": "<b 0xc700000001><r 16><t>",
+    "awghpk": true,
+    "awgcpa": 40,
+    "awgrekeyaftertime": 86400,
+    "awgrekeytimeout": 120,
+    "awgrejectaftertime": 180,
+    "awgkeepalivetimeout": 10,
+    "awgmaxhandshakeattempts": 3,
+    "awgrandomtrailers": true,
+    "awgdisablecookies": true,
+    "peers": [
+      {
+        "awgpeer": "base64...",
+        "awgdescr": "",
+        "awgpsk": true,
+        "awgpka": 25,
+        "awgendpoint": "192.0.2.1:51820",
+        "tx": 12345,
+        "rx": 54321,
+        "last_handshake": 1700000042,
+        "awgaip": ["10.9.0.2/32", "fd00::2/128"]
+      }
+    ]
+  }
+]
+.Ed
+.Pp
+A range is a number when both bounds agree and a
+.Dq lo-hi
+string otherwise.
+The boolean flags
+.Ic awghpk ,
+.Ic awgrandomtrailers ,
+.Ic awgdisablecookies
+and
+.Ic awgpsk
+are emitted as
+.Ic true .
+.Ic tx
+and
+.Ic rx
+are the kernel's byte counters;
+.Ic last_handshake
+is the kernel's own timestamp in seconds since the epoch, and is omitted for
+a peer that never handshaked.
+.Ic awgdescr
+and
+.Ic awgaip
+are always present, as an empty string and an empty array, because the kernel
+always holds those fields.
+.Pp
+A string value is JSON-escaped: quote, backslash,
+.Li \eb ,
+.Li \ef ,
+.Li \en ,
+.Li \er
+and
+.Li \et
+become two characters, and any other byte below 0x20 becomes
+.Li \eu00XX .
+The text form is unescaped: it prints the kernel's bytes. A description
+therefore stays readable in both modes and never breaks the document.
+With no
+.Ar name
+the array holds every
+.Ic awg Ns Ar N
+interface, in the order they are listed.
 .It Cm set Ar name Ar key value ...
 Apply the given interface keys in one
 .Dv SIOCSAWG .
@@ -157,6 +273,89 @@ reads the key from standard input.
 .It Cm del Ar name Cm peer Ar pubkey
 Remove one peer.
 .El
+.Ss Interface names
+An
+.Ar name
+is 1 to 15 characters from the set
+.Ql [A-Za-z0-9._-]
+and must not begin with
+.Ql -
+or
+.Ql .
+The limit is
+.Dv IFNAMSIZ Ns -1 ,
+the width of the field the kernel stores the name in: a longer name would be
+truncated and the command would act on a different interface than the one
+typed.
+A name that does not match is refused as a usage error
+.Pq exit 1
+before the first ioctl, address change, ifconfig execution or
+configuration-file access, so a rejected name has no side effect.
+.Ss Arguments
+Every subcommand has a fixed argument count and the synopsis is enforced:
+a missing argument, a surplus argument and an unknown keyword are usage
+errors.
+.Cm up
+takes
+.Fl -config
+at most once, and only after
+.Ar name ;
+a second
+.Fl -config
+is a usage error.
+.Cm set
+requires at least one
+.Ar key value
+pair.
+A repeated key is accepted and the last occurrence wins; the pairs are
+applied to one
+.Dv SIOCSAWG
+in the order given, so the last value of a key is the one that is written.
+.Cm add
+accepts
+.Cm allowed-ips
+more than once, and the entries accumulate; a repeated
+.Cm endpoint ,
+.Cm psk
+or
+.Cm keepalive
+replaces the earlier value.
+Keywords are case-sensitive and use the spelling shown in the synopsis, not
+the configuration file spelling.
+.Ss Output and diagnostics
+.Cm show
+writes the interface fields to standard output, one field per line, and
+writes nothing else there.
+No other subcommand writes to standard output: a successful
+.Cm up ,
+.Cm down ,
+.Cm set ,
+.Cm add
+or
+.Cm del
+is silent unless it warns, and every diagnostic, every warning and the
+.Fn usage
+text are written to standard error.
+The
+.Ev AWGCTL_DEBUG
+trace is written to standard error as well.
+.Ss Unprivileged use
+.Nm
+is not setuid and needs no privilege to answer a contract error: arguments,
+interface names and configuration-file trust are checked before any
+privileged operation, and each refusal is a usage error
+.Pq exit 1 .
+The configuration file is refused, rather than read, when the caller is not
+root and the tree holding it is not owned by
+.Ic root
+.Pq exit 1 .
+When the kernel refuses a
+.Dv SIOCGAWG
+or
+.Dv SIOCSAWG
+the command reports the kernel's error and exits with status 3, which is how
+an interface the caller may not configure is reported
+.Pq Er EPERM .
 .Ss Configuration file
 The file uses the wg-quick
 .Ic Key = value
@@ -269,7 +468,7 @@ allocator may reuse.
 calls
 .Fn pledge
 with
-.Dq stdio rpath inet dns proc exec
+.Dq stdio rpath inet route tty dns proc exec
 and
 .Fn unveil
 on
@@ -284,20 +483,31 @@ Print the SIOCGAWG size-probe trace (iteration, requested and returned
 size, errno) on stderr.
 .El
 .Sh EXIT STATUS
-.Ex -std
-.Bl -item
-.It
-0: success.
-.It
-1: usage error or I/O failure.
-.It
-2: configuration parse error.
-.It
-3:
+.Nm
+exits with one of the following values:
+.Bl -tag -width Ds
+.It 0
+Success.
+.It 1
+A usage error, or an I/O failure.
+A usage error is an unknown subcommand, an argument that does not match the
+synopsis
+.Pq missing, surplus, repeated where the synopsis allows one, or malformed ,
+or an invalid interface name.
+An I/O failure includes a configuration file that does not exist, cannot be
+opened, or fails the ownership, mode or symlink trust checks below.
+.It 2
+A configuration error: the file, or a value given to
+.Cm set ,
+parses as the expected spelling but is not valid for the driver.
+.It 3
+A
 .Dv SIOCSAWG
 or
 .Dv SIOCGAWG
-ioctl failure.
+ioctl failure, including
+.Er EPERM
+when the caller may not configure the interface.
 .El
 .Sh EXAMPLES
 .Bd -literal -offset indent

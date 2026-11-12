@@ -16,11 +16,24 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / 'install.sh').read_text()
 
+# AWG-014 R2 (R2-1/R2-2): take the shipped fsync-helper location from install.sh
+# instead of synthesising a $PWD default. The harness executes the same value the
+# script ships (so the $INSTALL_DB wiring is pinned by every run), and the helper
+# compiles into the sandbox instead of the process cwd (AWG-042-style tree litter).
+FSYNC_ASSIGN = re.search(r'(?m)^FSYNC_HELPER=\$\{([A-Za-z0-9_]+):-\$INSTALL_DB/awg-fsync\}$', SOURCE)
+assert FSYNC_ASSIGN, 'install.sh must assign FSYNC_HELPER from $INSTALL_DB'
+# Suites that do not pass INSTALL_DB still need a writable sandbox directory,
+# so $INSTALL_DB gets a $WORK fallback *inside* the shipped ${VAR:-...}
+# wrapper; the wrapper itself (variable name and /awg-fsync suffix) is kept
+# verbatim so the harness executes exactly what install.sh ships.
+FSYNC_HELPER = '${' + FSYNC_ASSIGN.group(1) + ':-${INSTALL_DB:-$WORK}/awg-fsync}'
+
 PRELUDE = '\n'.join([
     ': "${AWG_BUILD_USER:=_awgbuild}"',
     ': "${BUILD_USER:=$AWG_BUILD_USER}"',
     ': "${LOCK_INITIALISE_GRACE:=30}"',
     ': "${WORK:=$PWD}"',
+    'FSYNC_HELPER=' + FSYNC_HELPER,
     'log()  { echo "==> $*"; echo "==> $*" >> "$LOGFILE"; }',
     'die()  { echo "ERROR: $*" >&2; exit 1; }',
     'step() { echo ""; echo "---- $* ----"; }',
@@ -80,8 +93,23 @@ SHIM_STAT = ('#!/bin/sh\n'
              '  *)   printf \'%s\\n\' "$(printf \'%s\' "$row" | cut -f3)" ;;\n'
              'esac\n')
 SHIM_ID = '#!/bin/sh\necho 503\n'
+# Root `id -u` answer: install.sh only runs as root, so this is the ordinary
+# admin path (SECURITY-AUDIT AWG-039).
+SHIM_ID_ROOT = '#!/bin/sh\necho 0\n'
+# cc shim: ignore the source on stdin, create the -o target as a recording
+# shell script (python3 sets the exec bit; the harness chmod is a no-op shim)
+# so the test sees which binary path root later executes.
+SHIM_CC = ('#!/bin/sh\nout=""\nprev=""\nfor a in "$@"; do\n'
+           '    [ "$prev" = "-o" ] && out="$a"\n    prev="$a"\ndone\n'
+           '[ -n "$out" ] || out=a.out\ncat > /dev/null\n'
+           'python3 -c \'import sys,os; open(sys.argv[1],"w").write("#!/bin/sh\\necho \\"fsync $0 $*\\" >> \\"$CMDFILE\\"\\n"); os.chmod(sys.argv[1],0o755)\' "$out"\n')
 # doas shim: record the argv so the test can prove which account compiles.
 SHIM_DOAS = '#!/bin/sh\nprintf \'%s\\n\' "$@" >> "$CMDFILE"\n'
+# su shim: record argc plus one line per argv element, so a lost quote
+# (`-c $cmd`, which the shell word-splits) is distinguishable from `-c "$cmd"`.
+SHIM_SU = ('#!/bin/sh\n'
+           '{ printf \'argc=%d\\n\' "$#"; for a in "$@"; do printf \'arg=[%s]\\n\' "$a"; done; }'
+           ' >> "$CMDFILE"\n')
 SHIM_MAKE = '#!/bin/sh\nprintf \'make %s\\n\' "$*" >> "$CMDFILE"\n'
 
 
@@ -89,8 +117,27 @@ def extract(name):
     match = re.search(r'(?ms)^' + re.escape(name) + r'\(\) \{.*?^\}', SOURCE)
     assert match, 'install.sh needs a %s() function' % name
     if name == 'record_installed_pair':
-        return extract('prepare_durability_helper') + '\n' + match.group()
+        return (extract('prepare_durability_helper') + '\n'
+                + extract('installed_pair_kv') + '\n' + match.group())
     return match.group()
+
+
+# F9: the KARL relink-object lifecycle. The publish, the restore and the
+# manifest record all read the same helpers, so the sandbox bodies carry them
+# instead of stubbing them out (a stub would prove nothing about the shipped
+# code).
+RELINK_BODY = '\n'.join(extract(n) for n in (
+    'relink_dir', 'relink_object_count', 'relink_state_now', 'relink_object_kb',
+    'manifest_set_relink', 'publish_relink_objects', 'relink_restore_backup',
+    'restore_relink_generation', 'prune_relink_backups'))
+
+# The sandbox has no kernel build, so the artifact lookups point at the seeded
+# build directory. These definitions sit after the extracted functions and
+# before the publish call: they replace nothing the test exercises, they only
+# say where the "build" is.
+KERNEL_OVERRIDES = ('kernel_object_path() { echo "$KERNEL_OBJ"; }\n'
+                    'kernel_objdir() { echo "$KERNEL_OBJ_DIR"; }\n'
+                    'verify_kernel_artifact() { log "verified $1"; }\n')
 
 
 class Result:
@@ -141,6 +188,22 @@ class ShRunner:
                                   capture_output=True, text=True)
             return Result(proc, (w / 'CMDFILE').read_text(), (w / 'LOGFILE').read_text())
 
+    @staticmethod
+    def parse_argv(cmdlog):
+        """Parse an argc/argv recording shim (`argc=N` then `arg=[…]` per line).
+
+        Returns the argv list and cross-checks it against the recorded argc, so
+        a shell word-split (`-c $cmd`) is visible as a different count.
+        """
+        lines = [ln for ln in cmdlog.splitlines() if ln.strip()]
+        if not lines or not lines[0].startswith('argc='):
+            raise AssertionError('expected argc/argv recording, got: %r' % cmdlog)
+        declared = int(lines[0][len('argc='):])
+        body = [ln[len('arg=['):-1] for ln in lines[1:]]
+        if declared != len(body):
+            raise AssertionError('argc=%d but %d arg lines: %r' % (declared, len(body), cmdlog))
+        return body
+
 
 class InstallerTransaction(ShRunner, unittest.TestCase):
     # ── usage / argument parsing ─────────────────────────────────────────────
@@ -183,6 +246,26 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
         # The doas shim records one argv entry per line.
         self.assertIn('-u\n_awgbuild\nsh\n-c\nmake "-j4"', r.cmdlog)
 
+    def test_builder_make_root_uses_su_m_not_doas(self):
+        """AWG-039: as root the drop is `su -m`, which needs no doas rule.
+
+        check_root accepts uid 0 only, so this is the path an ordinary
+        `permit nopass <admin> as root` doas.conf takes. The su shim records
+        argc plus one line per argv element, so this pins the command as
+        exactly one `-c` argument (OpenBSD su(1) passes shell arguments to the
+        login shell, unlike GNU su's option parsing) and a lost quote
+        (`-c $cmd`, word-split into extra argv) fails the count assertion.
+        """
+        body = (extract('resolve_build_user') + '\n' + extract('builder_run') + '\n'
+                + extract('builder_make') + '\nbuilder_make __W__ -j4\n')
+        r = self.run_sh(body, {'id': SHIM_ID_ROOT, 'su': SHIM_SU, 'doas': SHIM_DOAS,
+                               'make': SHIM_MAKE})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('building as _awgbuild', r.logfile)
+        argv = self.parse_argv(r.cmdlog)
+        self.assertEqual(argv, ['-m', '_awgbuild', '-c', 'make "-j4"'], r.cmdlog)
+        self.assertEqual(len(argv), 4, 'su must receive exactly 4 argv entries: ' + r.cmdlog)
+
     def test_builder_make_root_requires_flag(self):
         body = (extract('resolve_build_user') + '\n' + extract('builder_run') + '\n'
                 + extract('builder_make') + '\nBUILD_USER=root\nbuilder_make /tmp\n')
@@ -191,16 +274,18 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
         self.assertIn('--allow-root-build', r.stderr)
 
     def test_every_make_goes_through_the_builder(self):
-        """Root must not run a second make path that bypasses builder_make."""
+        """Root must not run a second make path that bypasses builder_make.
+
+        AWG-014 R1 D-1: `make -V .OBJDIR` used to run as root inside the tree
+        chowned to the builder. Command position includes command
+        substitutions and `&&` continuations, not just the start of a line,
+        so a root-context make reintroduced in any of those forms fails here.
+        """
         builder = extract('builder_make')
         self.assertRegex(builder, r'\bmake\b')
-        # Command-position `make` invocations: builder_make plus the read-only
-        # `make -V .OBJDIR` query that locates the built ifconfig binary.
-        allowed = ('make"$cmd"', 'make -V .OBJDIR')
-        for line in SOURCE.splitlines():
-            if re.match(r'^\s*make(\s|$)', line):
-                self.assertTrue(any(a in line for a in allowed),
-                                'unexpected make invocation: %s' % line.strip())
+        root_ctx = [line.strip() for line in SOURCE.splitlines()
+                    if re.search(r'(?:^|&&|\$\()\s*make(\s|$)', line)]
+        self.assertEqual(root_ctx, [], 'unexpected root-context make: %s' % root_ctx)
 
     # ── AWG-014: source tree trust ───────────────────────────────────────────
     def test_tree_trust_accepts_root_and_builder(self):
@@ -276,6 +361,7 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
                      + '\n' + extract('remove_pair_member')
                      + '\n' + extract('restore_generation_pair')
                      + '\n' + extract('record_installed_pair')
+                     + '\n' + RELINK_BODY
                      + '\n' + extract('rollback_pair') + '\nrollback_pair\n')
 
     def pair_env(self, w):
@@ -335,10 +421,13 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
 
     # ── AWG-029: --check reports the pair ────────────────────────────────────
     CHECK_BODY = (extract('verify_ifconfig_source') + '\n' + extract('manifest_get')
+                  + '\n' + extract('kernel_db_sha')
                   + '\n' + extract('resolve_build_user') + '\n' + extract('tree_trust')
+                  + '\n' + RELINK_BODY
                   + '\n' + extract('check_plan') + '\ncheck_plan\n')
 
-    def check_run(self, w, bsd_matches=True, ifc_matches=True, trust='trusted'):
+    def check_run(self, w, bsd_matches=True, ifc_matches=True, trust='trusted',
+                  kernel_db=None, bsd_bytes=b'kernel-bytes\n'):
         (w / 'sys').mkdir()
         (w / 'sys' / 'ifconfig.c').write_text('pristine\n')
         (w / 'ifcfg').mkdir()
@@ -348,7 +437,12 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
         (w / 'ifcfg' / 'ifconfig.c.orig').write_text('pristine\n')
         self.pair_tree(w)
         if not bsd_matches:
-            (w / 'bsd').write_bytes(b'other-kernel\n')
+            (w / 'bsd').write_bytes(bsd_bytes)
+        if kernel_db is not None:
+            # /var/db/kernel.SHA256 keyed by the boot path, as sha256 -h writes
+            # it; %s is the digest of the bytes the fixture put in /bsd.
+            (w / 'kernel.SHA256').write_text(
+                kernel_db % hashlib.sha256(bsd_bytes).hexdigest())
         if not ifc_matches:
             (w / 'ifconfig').write_bytes(b'other-ifconfig\n')
         env = {'MANIFEST': str(w / 'manifest'),
@@ -401,6 +495,26 @@ class InstallerTransaction(ShRunner, unittest.TestCase):
             self.assertNotEqual(r.returncode, 0)
             self.assertIn('src trust     : untrusted', r.stdout)
 
+    def test_check_reports_karl_relink_without_false_mismatch(self):
+        """AWG-029: KARL relinks /bsd at boot, so the integrity DB holds a
+        different digest than the staged kernel the manifest recorded. --check
+        must trust the DB, note the relink, and not report a pair mismatch;
+        only the absent signify key keeps the exit status non-zero."""
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            r = self.check_run(w, bsd_matches=False,
+                               bsd_bytes=b'relinked-kernel\n',
+                               # sha256 -h writes the path it was given, which
+                               # is $BSD_FILE (the sandbox's /bsd).
+                               kernel_db='SHA256 (%s) = %%s\n' % (w / 'bsd'))
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn('kernel sha256 : matches', r.stdout)
+            self.assertIn('relink        : /bsd differs from the staged kernel'
+                          ' (KARL relink, expected after boot)', r.stdout)
+            self.assertNotIn('MISMATCH', r.stdout)
+            self.assertIn('ifconfig sha  : matches manifest', r.stdout)
+            self.assertIn('signify key   : MISSING', r.stdout)
+
 
 class InstallerLockAndPublish(ShRunner, unittest.TestCase):
     """R4-01: host-wide lock + pre-exit /bsd check.
@@ -423,7 +537,15 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
              + '\n' + extract('read_lock_owner') + '\n' + extract('lock_token_pid')
              + '\n' + extract('lock_record_age')
              + '\n' + extract('acquire_lock')
-             + '\n' + extract('verify_lock_held') + '\nacquire_lock\nsleep 0.2\nverify_lock_held\n')
+             + '\nacquire_lock\nsleep 0.2\n'
+             'verify_held_inline() {\n'
+             '    [ "$LOCK_OWNED" = yes ] || { echo "lock not held" >&2; exit 1; }\n'
+             '    [ "$(read_lock_owner "$LOCK_SLOT")" = "$LOCK_TOKEN" ] \\\n'
+             '        && [ ! -e "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \\\n'
+             '        && [ ! -L "$LOCKFILE.claim-$((LOCK_GEN + 1))" ] \\\n'
+             '        || { echo "lock replaced by another run" >&2; exit 1; }\n'
+             '}\n'
+             'verify_held_inline\n')
 
     def lock_env(self, w):
         return {'LOCKFILE': str(w / 'lock'), 'WORK': str(w)}
@@ -500,7 +622,8 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
             self.assertIn('pid=%s ' % winners[0].pid, os.readlink(w / 'lock.claim-5'))
             self.assertEqual(len(list(w.glob('lock.claim-*'))), 1)
 
-    VERIFY_BODY = (extract('manifest_get') + '\n' + extract('verify_bsd_final')
+    VERIFY_BODY = (extract('manifest_get') + '\n' + extract('kernel_db_sha')
+                   + '\n' + extract('verify_bsd_final')
                    + '\nverify_bsd_final\n')
 
     def bsd_check(self, bsd_bytes, manifest_text, stat_out='13'):
@@ -534,7 +657,7 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
         self.assertIn('does not match the manifest', r.stderr)
 
     GEN_BODY = (extract('manifest_get') + '\n' + extract('next_generation') + '\n'
-                + extract('backup_member') + '\n'
+                + extract('backup_member') + '\n' + extract('manifest_apply_kv') + '\n'
                 + extract('write_backup_pair')
                 + '\nwrite_backup_pair\necho "gen=$GENERATION bsd=$BSD_BACKUP ifc=$IFCFG_BACKUP"\n')
 
@@ -593,14 +716,21 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
                     + '\n' + extract('remove_pair_member')
                     + '\n' + extract('restore_generation_pair')
                     + '\n' + extract('release_tag') + '\n' + extract('next_generation')
+                    + '\n' + extract('manifest_apply_kv')
                     + '\n' + extract('write_backup_pair')
+                    + '\n' + extract('snapshot_precommit_manifest')
+                    + '\n' + extract('manifest_describes_live_pair')
+                    + '\n' + RELINK_BODY
+                    + '\n' + extract('installed_pair_kv')
+                    + '\n' + extract('recover_installed_record')
                     + '\n' + extract('publish_ifconfig') + '\n' + extract('publish_header')
                     + '\n' + extract('kernel_publish')
                     + '\n' + extract('publish_awgctl') + '\n' + extract('record_installed_pair')
                     + '\n' + extract('prune_old_backups') + '\n' + extract('restore_previous_pair')
                     + '\n' + extract('rollback_uncommitted')
                     + '\n' + extract('publish_abort')
-                    + '\n' + extract('publish_pair') + '\npublish_pair\n')
+                    + '\n' + extract('publish_pair')
+                    + '\n' + KERNEL_OVERRIDES + 'publish_pair\n')
 
     def publish_env(self, w):
         env = self.backup_env(w)
@@ -609,6 +739,9 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
         env['IFCFG_ARTIFACT'] = str(w / 'build' / 'ifconfig')
         env['AWGCTL_ARTIFACT'] = str(w / 'build' / 'awgctl')
         env['KERNEL_OBJ'] = str(w / 'build' / 'bsd')
+        env['KERNEL_OBJ_DIR'] = str(w / 'build')
+        env['RELINK_KERNEL_DIR'] = str(w / 'relink')
+        env['KERNEL_IDENT'] = 'AWG.MP'
         return env
 
     def seed_build(self, w):
@@ -620,6 +753,15 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
         (w / 'build' / 'ifconfig').chmod(0o755)
         (w / 'build' / 'awgctl').chmod(0o755)
         (w / 'build' / 'bsd').chmod(0o755)
+        # F9: what a real kernel build leaves behind — the compile Makefile
+        # (with the relink targets), makegap.sh, ld.script and the objects.
+        (w / 'build' / 'Makefile').write_text(
+            'all:\n\t@echo all\nnewbsd:\n\t@echo newbsd\nreconfig:\n\t@echo reconfig\n'
+            'newinstall:\n\t@echo newinstall\n')
+        (w / 'build' / 'makegap.sh').write_text('#!/bin/sh\n')
+        (w / 'build' / 'ld.script').write_text('SECTIONS { }\n')
+        (w / 'build' / 'if_awg.o').write_bytes(b'obj-if_awg\n')
+        (w / 'build' / 'awg_noise.o').write_bytes(b'obj-awg_noise\n')
 
     def test_publish_success_records_generation_pair(self):
         with tempfile.TemporaryDirectory() as d:
@@ -650,6 +792,53 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
                           + hashlib.sha256(b'new-ctl\n').hexdigest(), manifest)
             self.assertIn('installed_bsd_size=13', manifest)
 
+    # AWG-014 R2 (R2-1): pin the shipped default itself. The D-2 negative
+    # control proves the exec sites honour $FSYNC_HELPER; this proves the
+    # shipped assignment anchors the helper in the root-owned install DB, so
+    # reverting it to the builder-writable $WORK fails the suite.
+    def test_fsync_helper_default_is_anchored_in_the_install_db(self):
+        self.assertRegex(SOURCE, r'(?m)^FSYNC_HELPER=\$\{[A-Za-z0-9_]+:-\$INSTALL_DB/awg-fsync\}$',
+                         'the fsync helper must default under $INSTALL_DB')
+        self.assertNotIn('"$WORK/awg-fsync"', SOURCE)
+        # The harness executes the shipped assignment (same ${VAR:-...} wrapper
+        # and /awg-fsync suffix, with a $WORK sandbox fallback for suites that
+        # do not pass INSTALL_DB) — not a synthesised $PWD path.
+        self.assertIn('${' + FSYNC_ASSIGN.group(1) + ':-', FSYNC_HELPER)
+        self.assertIn('/awg-fsync}', FSYNC_HELPER)
+        self.assertNotIn('${PWD}/awg-fsync', FSYNC_HELPER)
+
+    # AWG-014 R1 D-2 negative control: $WORK is chowned to the builder, so a
+    # helper planted there must not be the binary root executes. The helper is
+    # compiled into the root-owned $INSTALL_DB; the planted $WORK file stays
+    # untouched and unexecuted.
+    def test_builder_planted_fsync_helper_is_not_the_one_root_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            self.seed_pair(w)
+            self.seed_build(w)
+            (w / 'db').mkdir()
+            body = ('echo PLANTED > "$WORK/awg-fsync"\nchmod 700 "$WORK/awg-fsync"\n'
+                    + self.PUBLISH_BODY.replace('publish_pair\n',
+                        'kernel_object_path() { echo "$KERNEL_OBJ"; }\n'
+                        'verify_kernel_artifact() { log "verified $1"; }\n'
+                        + 'publish_pair\n'))
+            env = self.publish_env(w)
+            env['INSTALL_DB'] = str(w / 'db')
+            r = self.run_sh(body,
+                            {'sha256': SHIM_SHA256, 'install': SHIM_INSTALL,
+                             'stat': '#!/bin/sh\necho 13\n', 'uname': SHIM_UNAME,
+                             'chmod': '#!/bin/sh\nexit 0\n', 'chown': '#!/bin/sh\nexit 0\n',
+                             'ln': '#!/bin/sh\nexit 0\n', 'rm': '#!/bin/sh\nexit 0\n',
+                             'cmp': '#!/bin/sh\nexit 0\n', 'cc': SHIM_CC},
+                            env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('Published generation 1', r.logfile)
+            # The planted file exists (the builder can write it) and every
+            # fsync invocation ran the helper compiled into $INSTALL_DB.
+            self.assertEqual((w / 'awg-fsync').read_text(), 'PLANTED\n')
+            self.assertIn('fsync %s/awg-fsync' % (w / 'db'), r.cmdlog)
+            self.assertNotIn('fsync %s/awg-fsync ' % w, r.cmdlog)
+
     def test_publish_failure_restores_previous_pair(self):
         with tempfile.TemporaryDirectory() as d:
             w = Path(d)
@@ -677,7 +866,14 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
             self.assertEqual((w / 'ifconfig').read_bytes(), b'ifconfig-bytes\n')
             manifest = (w / 'manifest').read_text()
             self.assertIn('generation=1', manifest)
-            self.assertNotIn('installed_bsd_sha256', manifest)
+            # F5: recovery must leave a manifest that describes the pair which
+            # is live again — every installed_* key present, and no trace of
+            # the artifacts this run failed to commit.
+            self.assertIn('installed_bsd_sha256='
+                          + hashlib.sha256(b'kernel-bytes\n').hexdigest(), manifest)
+            self.assertIn('installed_ifconfig_sha256='
+                          + hashlib.sha256(b'ifconfig-bytes\n').hexdigest(), manifest)
+            self.assertNotIn(hashlib.sha256(b'new-kernel\n').hexdigest(), manifest)
             self.assertFalse(list(w.glob('manifest.tmp.*')))
 
     # install(8) shim that fails the first awgctl install: the kernel, header
@@ -737,7 +933,14 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
             self.assertEqual((w / 'bsd').read_bytes(), b'kernel-bytes\n')
             self.assertEqual((w / 'ifconfig').read_bytes(), b'ifconfig-bytes\n')
             manifest = (w / 'manifest').read_text()
-            self.assertIn('generation=2', manifest)
+            # F5: the manifest that was live before this run is restored whole
+            # (generation 1, its own installed_* keys), not the generation-2
+            # record of a publish that never committed.
+            self.assertIn('generation=1', manifest)
+            self.assertNotIn('generation=2', manifest)
+            self.assertIn('installed_bsd_sha256='
+                          + hashlib.sha256(b'kernel-bytes\n').hexdigest(), manifest)
+            self.assertNotIn(hashlib.sha256(b'new-kernel\n').hexdigest(), manifest)
             # The restore rewrites the installed-pair keys with the restored
             # generation's hashes (the pre-existing manifest had none).
             self.assertIn('backup_bsd_sha256='
@@ -814,6 +1017,7 @@ class InstallerLockAndPublish(ShRunner, unittest.TestCase):
                             + extract('remove_pair_member') + '\n'
                             + extract('restore_generation_pair') + '\n'
                             + extract('record_installed_pair') + '\n'
+                            + RELINK_BODY + '\n'
                             + extract('rollback_pair') + '\nrollback_pair\n')
 
     def test_rollback_restores_kernel_tool_header_together(self):

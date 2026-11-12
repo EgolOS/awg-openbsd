@@ -30,10 +30,25 @@ SSH_OPTS = -o BatchMode=yes -o StrictHostKeyChecking=yes \
 SSH  = ssh $(SSH_OPTS) -p $(LAB_VM_PORT)
 SCP  = scp $(SSH_OPTS) -P $(LAB_VM_PORT)
 
-.PHONY: check check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch check-vm check-interop baseline manifest awgctl awgctl-fixture clean
+.PHONY: check check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch check-gitclean check-upstream check-citations check-matrix check-citation-tests check-repro check-vm check-interop baseline manifest awgctl awgctl-fixture install clean
 
-check: check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch
+check: check-syntax check-py check-tests check-cgate check-oracle check-scan check-patch check-upstream check-citations check-matrix check-repro
 	@echo "repository checks: OK"
+
+# E2-HYGIENE: a build must leave the tree porcelain-clean. v0.2.1-rc1 shipped
+# with sbin/awgctl/obj/ (the bsd.prog.mk object directory) untracked, where a
+# later git add/rsync can misjudge it. Run after a clean build+test:
+#   make awgctl check check-gitclean
+# Fails (exit 2) listing every dirty entry when `git status --porcelain` is
+# not empty; needs a git checkout (porcelain exits 128 outside one).
+check-gitclean:
+	@dirty=$$(git status --porcelain) || { echo "git status failed" >&2; exit 2; }; \
+	if [ -n "$$dirty" ]; then \
+	    printf '%s\n' "$$dirty"; \
+	    echo "tree is dirty after build+test: $$dirty" >&2; \
+	    exit 2; \
+	fi
+	@echo "git tree: clean"
 
 # The compiled-C integration gate is only worth running if it can fail. This
 # self-check proves that property: a clean run is green, and a run with I2
@@ -61,21 +76,61 @@ check-syntax:
 	@echo "shell syntax: OK"
 
 check-py:
-	@$(PYTHON) -m py_compile tools/*.py tools/lab/*.py tools/tests/*.py
-	@rm -rf tools/__pycache__ tools/lab/__pycache__
+	@$(PYTHON) -B -m py_compile tools/*.py tools/lab/*.py tools/tests/*.py
+	@rm -rf tools/__pycache__ tools/lab/__pycache__ tools/tests/__pycache__
 	@echo "python: OK"
 
 check-tests:
-	@$(PYTHON) -m unittest discover -s tools/tests -v
+	@$(PYTHON) -B -m unittest discover -s tools/tests -v
+	@$(PYTHON) tools/test_check_citations.py
+
+# The citation guard's own behavioural regressions, runnable on their own.
+check-citation-tests:
+	@$(PYTHON) tools/test_check_citations.py
 
 check-scan:
-	@$(PYTHON) tools/publish-scan.py --self-test
-	@$(PYTHON) tools/publish-scan.py
+	@$(PYTHON) -B tools/publish-scan.py --self-test
+	@$(PYTHON) -B tools/publish-scan.py
 	@echo "publish scan: clean"
 
 check-patch:
 	@sh generate-patch.sh --check
 	@echo "generated patch: current"
+
+# E2: the recorded upstream digest (tools/upstream/<release>.sha256) must
+# match the vendored stock kern_pledge.c and the generated patch artifact.
+# A silent upstream drift (stock refreshed, manifest forgotten, or the
+# reverse) fails the gate before a release ships the mismatched pair.
+check-upstream:
+	@$(PYTHON) tools/upstream-digest-check.py
+	@echo "upstream digest: current"
+
+# Citation consistency check: verifies that all commit SHAs, test names,
+# report paths, and evidence paths cited in documentation actually exist
+# in the current tree. A hash that does not resolve passes only when
+# docs/EXTERNAL-REFS.md declares its provenance *and* the citing file is one
+# the table allows; those hits are reported as external (unverifiable here),
+# never as verified, and docs/ may not cite out-of-tree workspace hashes.
+check-citations:
+	@$(PYTHON) tools/check-citations.py
+
+# Matrix gate: validates structure, source inventory, evidence semantics,
+# Summary Counts, every FILE:LINE anchor (in range, and on a line that shares
+# the row's own subject words) and every Evidence Index commit (the artifact
+# must actually be present in the commit the index names).
+check-matrix:
+	@$(PYTHON) tools/check_matrix_totals.py
+
+# Reproducible archive verification: build twice, verify identical hashes,
+# and verify the check fails when deliberately perturbed.
+# When run from a git repo, pass version/commit from git; when run from
+# an export, these will be empty and the test script uses env vars.
+# AWG_SOURCE_REPO must be set for clean exports (no .git directory).
+check-repro:
+	@AWG_VERSION="$${AWG_VERSION:-$(KVER)}" \
+	 AWG_COMMIT="$${AWG_COMMIT:-$(shell git -C $(CURDIR) rev-parse HEAD 2>/dev/null || echo unknown)}" \
+	 AWG_SOURCE_REPO="$${AWG_SOURCE_REPO:-$(CURDIR)}" \
+	 sh tools/test-reproducible-archive.sh
 
 check-vm:
 	@test "$(AWG_LAB_DISPOSABLE)" = 1 || { echo "set AWG_LAB_DISPOSABLE=1 for disposable lab VMs" >&2; exit 1; }
@@ -118,11 +173,15 @@ awgctl:
 # stub (tools/lab/fixture-stubs.c) plus a recording ifconfig stand-in, so the
 # R5 regression cases (CAS token, address read-back, arity) run without an
 # OpenBSD kernel. Needs a POSIX host with cc; not part of the release.
+# R1 review: the binary is built into a per-run directory under $TMPDIR so
+# two worktrees compiling the fixture at once do not share one object file.
+AWGCTL_FIXTURE ?= $(shell echo "$${TMPDIR:-/tmp}")/awgctl-fixture
 awgctl-fixture:
 	$(CC) $(CFLAGS) -DAWGCTL_LINUX -Isrc -Isbin/awgctl \
 		-DIFCONFIG_PATH='"$(AWGCTL_FIX_IFCONFIG)"' \
-		-o awgctl-fixture sbin/awgctl/awgctl.c \
+		-o "$(AWGCTL_FIXTURE)" sbin/awgctl/awgctl.c \
 		tools/lab/fixture-stubs.c -lutil
+
 # Release metadata for a built kernel: hashes, versions, test results.
 #   make manifest KERNEL=/usr/src/sys/arch/amd64/compile/AWG.MP/obj/bsd \
 #       RELEASE=8.0 COMMIT=$(git rev-parse --short HEAD) TESTS="smoke=pass"
@@ -136,5 +195,17 @@ manifest:
 	    --release $(RELEASE) --version $(KVER) --commit $(COMMIT) \
 	    $(foreach t,$(TESTS),--tests $(t))
 
+# E2-HYGIENE: explicit install contract. Without this rule GNU make used its
+# implicit "%: %.sh" rule and `make install` silently created an untracked
+# executable copy named ./install in the source tree (copy of install.sh,
+# rc=0, nothing installed, `git status --porcelain` dirty). The release
+# packaging mechanism is install.sh: run it directly, with the mode selectable
+# (AWG_INSTALL_MODE = --all | --tools-only | --kernel-only, default --all).
+# It creates no files in the source tree, so check-gitclean stays clean.
+AWG_INSTALL_MODE ?= --all
+install:
+	@sh install.sh $(AWG_INSTALL_MODE)
+
 clean:
-	@rm -rf tools/__pycache__ tools/lab/__pycache__
+	@rm -rf tools/__pycache__ tools/lab/__pycache__ tools/tests/__pycache__
+	@rm -rf sbin/awgctl/obj

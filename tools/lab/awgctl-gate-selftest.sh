@@ -10,7 +10,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/awgctl-gate-selftest.XXXXXX") || exit 1
 cleanup() { s=$?; rm -rf "$tmp"; exit "$s"; }
 trap cleanup EXIT INT TERM
 rc=0
-want_pass=${AWGCTL_GATE_PASS:-74}
+want_pass=${AWGCTL_GATE_PASS:-81}
 want_fail=${AWGCTL_GATE_FAIL:-0}
 inject=${AWGCTL_GATE_INJECT_ISPEC2:-'<b 0xdead>'}
 want_inject_ids=${AWGCTL_GATE_INJECT_IDS:-'F13a F13c'}
@@ -62,7 +62,7 @@ else
 fi
 
 # A generic nonzero exit is not a negative-control receipt. The control must
-# first prove a built 74/0 clean run and an MTU-only 72/2 injected comparison.
+# first prove a built 81/0 clean run and an MTU-only 79/2 injected comparison.
 if [ -z "${AWGCTL_GATE_SKIP_ADVERSARY:-}" ]; then
 	if [ ! -f "$adversary" ]; then
 		echo 'gate-selftest: FAIL — mandatory adversary missing'
@@ -72,7 +72,7 @@ if [ -z "${AWGCTL_GATE_SKIP_ADVERSARY:-}" ]; then
 		adv_rc=$?
 		cat "$tmp/adversary.log"
 		if [ "$adv_rc" != 1 ] ||
-		    [ "$(grep -c '^guard-adversary: VERIFIED built; clean=74/0; injected=72/2; cause=mtu; guard=rejected$' "$tmp/adversary.log")" != 1 ] ||
+		    [ "$(grep -c '^guard-adversary: VERIFIED built; clean=81/0; injected=79/2; cause=mtu; guard=rejected$' "$tmp/adversary.log")" != 1 ] ||
 		    ! "$python" "$records" mtu "$tmp/evidence/clean.log" "$tmp/evidence/injected.log" "${ADVERSARY_MTU:-1419}" ||
 		    ! grep -q '^gate-selftest: FAIL — selected suite extracted-function I2-only render probe failed$' "$tmp/evidence/guard.log"; then
 			echo "gate-selftest: FAIL — mandatory adversary did not prove an executed MTU-only rejection (rc=$adv_rc)"

@@ -1785,19 +1785,27 @@ awg_send_junk(struct awg_softc *sc, struct awg_peer *peer)
 	uint8_t			buf[1500];
 	uint16_t		pktlen;
 	int			i;
+	/* AWG-020: snapshot the junk triple once. The guard and the loop
+	 * below used to re-read jc/jmin/jmax, so a writer in awg_ioctl_set
+	 * could leave a torn pair (jmin new, jmax old): the uint16_t span
+	 * promotes to uint32_t, arc4random_uniform returns up to that
+	 * wrapped bound, and arc4random_buf overruns buf[]. One snapshot
+	 * makes the guard and the loop see the same (jc, jmin, jmax). */
+	uint16_t		jc = sc->sc_awg_jc;
+	uint16_t		jmin = sc->sc_awg_jmin;
+	uint16_t		jmax = sc->sc_awg_jmax;
 
-	if (sc->sc_awg_jc == 0 || sc->sc_awg_jmin == 0 ||
-	    sc->sc_awg_jmax < sc->sc_awg_jmin ||
-	    sc->sc_awg_jmax > sizeof(buf))
+	if (jc == 0 || jmin == 0 ||
+	    jmax < jmin || jmax > sizeof(buf))
 		return;
 
 	awg_peer_get_endpoint(peer, &endpoint);
-	for (i = 0; i < sc->sc_awg_jc; i++) {
-		if (sc->sc_awg_jmin == sc->sc_awg_jmax)
-			pktlen = sc->sc_awg_jmin;
+	for (i = 0; i < jc; i++) {
+		if (jmin == jmax)
+			pktlen = jmin;
 		else
-			pktlen = sc->sc_awg_jmin + (uint16_t)
-			    arc4random_uniform(sc->sc_awg_jmax - sc->sc_awg_jmin + 1);
+			pktlen = jmin + (uint16_t)
+			    arc4random_uniform(jmax - jmin + 1);
 		arc4random_buf(buf, pktlen);
 		awg_send_buf(sc, &endpoint, buf, pktlen);
 	}

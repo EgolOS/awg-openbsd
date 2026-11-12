@@ -15,13 +15,29 @@ rebuilds `AWG.MP#1..#4`, `tools/lab/smoke-test.sh` as the PASS/FAIL gate.
 The first run of `wire-test.sh` panicked the kernel in `awg_reset_3_1()` and produced
 `AWG-030`; the fix is in the working tree after `f43535e`.
 
-**Not covered:** two-VM interoperability with `amneziawg-go`/Android/Linux clients (only the
+**Not covered in that pass:** two-VM interoperability with `amneziawg-go`/Android/Linux clients (only the
 loopback handshake in `smoke-test.sh` and one client bring-up were exercised); throughput
 measurement at 1 vCPU; long-run stress (hour-scale rekey/flood soak, memory growth over time);
 fuzzing of the packet parser beyond the fixed negative cases. Nothing in this register claims
 coverage of those four.
 
 Evidence paths are relative to `~/projects/awg-openbsd-audit/` unless they name a repo file.
+
+## Current revalidation (E1 integration + E2 wave, 2026-11-10)
+
+`eng/integration-e1` at `a1393fc` integrates the accepted E1 parents and the
+accepted E2 work; `make check` re-ran green there (rc=0, 138 tests, 1 skipped
+— `evidence/e2-docs/e2docs-base-make-check.log`; the E1 integration report
+`reports/E1-CTO-integration.md` records the earlier `0e557e1` run at 130
+tests). Register states moved in this cycle:
+**AWG-020** fixed (junk-triple snapshot + 1500 bound, `083e0d9`; native
+runtime not tested), **AWG-037** rejected (scalar/ABI claim; native ABI not
+tested), **AWG-039** fixed-unverified (`su -m`; native `su(1)` not tested),
+**AWG-041** fixed-verified on Linux (in-run takeover refused; native lock
+paths not tested), **AWG-014/029** carried as deferred release blockers
+(installer-txn `b4dc032` DeepSeek-approved; CTO gate not run). The native
+install, interop, stress and performance gates remain NOT TESTED for this
+integrated tree.
 
 ## Current revalidation (local series, 2026-11-07)
 
@@ -38,11 +54,21 @@ soak, coverage-guided fuzzing or performance result is claimed.
 | Severity | fixed | open | accepted | rejected | total |
 |---|---|---|---|---|---|
 | critical | 0 | 0 | 0 | 0 | 0 |
-| high | 5 | 0 | 1 | 1 | 7 |
-| medium | 10 | 1 | 1 | 0 | 12 |
-| low | 11 | 0 | 3 | 0 | 14 |
-| info | 1 | 1 | 1 | 0 | 3 |
-| **total** | **27** | **2** | **6** | **1** | **36** |
+| high | 7 | 0 | 1 | 1 | 9 |
+| medium | 12 | 0 | 0 | 0 | 12 |
+| low | 13 | 0 | 2 | 1 | 16 |
+| info | 2 | 0 | 1 | 0 | 3 |
+| **total** | **34** | **0** | **4** | **2** | **40** |
+
+Totals are the register entries AWG-001..041 (40 entries; AWG-036 is a family
+reference cited from AWG-037, not an entry of its own). The fixed column
+normalises the register's `fixed-verified` and `fixed-unverified` states
+(AWG-041, AWG-039) together with `fixed`, so the column sums to the total row
+(34 + 0 + 4 + 2 = 40); this table is a verbatim copy of the tally tool output
+(`evidence/e2-docs/r4-parse-register.py`, `evidence/e2-docs/r4-register-tally.txt`).
+The 2026-11-07 pass counted 36 findings; the
+2026-11-10 revalidation above moves AWG-020/037/039/041 and carries
+AWG-014/029 as deferred blockers.
 
 ## Register
 
@@ -245,7 +271,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   paths are preserved, not globally banned. Native OpenBSD tests used the actual
   `permit nopass :wheel` lab policy: user-owned 0600, root file under a user-owned
   parent, and symlink to an untrusted target were refused; root-private config passed.
-  Evidence: `docs/evidence/2026-11-07/native-checks.log`, `test_quick_parser.py`.
+  Evidence: `docs/evidence/2026-11-07/native-checks.log`, `tools/tests/test_quick_parser.py`.
   Residual: hooks are intentional root programs; no claim that untrusted provider
   content becomes safe. Narrow doas policy matrices have not all been rehearsed.
 
@@ -261,7 +287,11 @@ soak, coverage-guided fuzzing or performance result is claimed.
   root fallback), `tree_trust` walks every component of the build tree after resolving symlinks
   and refuses one owned by a third party or group/other-writable, and `builder_make` runs
   `config`/`make` through `doas -u <builder>`. `--allow-root-build` exists for recovery only and
-  prints a warning.
+  prints a warning. The 2026-11-09 re-verification (E2-INSTALLER-B) closed two residual
+  root-execution paths: the `.OBJDIR` query that locates the built ifconfig now goes through the
+  same `builder_run` path (it previously ran `make -V` as root inside the builder-owned tree),
+  and the fsync commit helper is compiled once into the root-owned `$INSTALL_DB` so a
+  builder-planted executable cannot be the binary root executes.
 - Validation: `tools/tests/test_installer_transaction.py` (17 tests) plus the disposable-guest
   rehearsal `tools/lab/installer-recovery-test.sh` scenario e (a group-writable tree is refused
   with the path, owner and mode). The unprivileged build was proven end to end on OpenBSD 8.0:
@@ -271,7 +301,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
 - Residual: the builder still compiles code that root installs; the integrity boundary is
   `verify_kernel_artifact` plus the manifest, not the compiler. A compromised builder can produce
   a kernel that passes an ELF/symbol check — the same trust any package build carries.
-- Evidence: `docs/evidence/2026-11-07/w1/01-build.log`, `01b-unpriv.log`, `reports/w1.md`
+- Evidence: `reports/w1.md` (historical run; synthetic logs removed per R2-1)
 
 ### AWG-015 — `awg_last_underload` is one static shared by every `awg` interface
 - Severity: low · State: fixed · Confidence: confirmed
@@ -335,7 +365,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   (F-B4), `run-1/REPORT.md`
 
 ### AWG-020 — Obfuscation fields read lock-free: torn 32-bit range, half-old HPK
-- Severity: low · State: accepted · Confidence: confirmed (worst case quantified)
+- Severity: low · State: fixed (2026-11-10, `083e0d9`: junk triple snapshotted once, `pktlen` bounded to `buf[1500]`; native runtime NOT TESTED) · Confidence: confirmed (worst case quantified)
 - Surface: remote, unauthenticated datagram racing a `SIOCSAWG`
 - Affected: all commits through `f43535e`
 - Root cause: `src/if_awg.c:2726-2739` copies `h1..h4` as two 32-bit words each and the 32-byte
@@ -438,7 +468,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   bounded collision retry. Generation still uses OpenSSL and /dev/random CSPRNGs.
   Unit contract tests and native OpenBSD `sh -x` generation passed. The small legacy
   generator intentionally supports IPv4 tunnel addresses, with IPv4/IPv6 endpoints.
-  Evidence: `docs/evidence/2026-11-07/generator-native.log`, `test_gen_config.py`.
+  Evidence: `docs/evidence/2026-11-07/generator-native.log`, `tools/tests/test_gen_config.py`.
 
 ### AWG-027 — `awg_send_hs` trailer arithmetic is overflow-free; `MCLGETL` failure handled
 - Severity: info · State: accepted · Confidence: confirmed
@@ -491,7 +521,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   `tools/tests/test_installer_transaction.py`
 
 ### AWG-037 — `struct awg_aip_io` declares `addr_bytes` as a single byte
-- Severity: low · State: open · Confidence: confirmed
+- Severity: low · State: rejected (2026-11-10, scalar/ABI claim; native ABI NOT TESTED) · Confidence: confirmed
 - Surface: local privileged (an ioctl consumer other than the bundled ifconfig)
 - Affected: `src/if_awg.h:57-64` at `7afa788`
 - Root cause: the union member is `uint8_t addr_bytes;` where upstream `if_wg.h` has
@@ -628,7 +658,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   pre-fix binary died with `Abort trap (core dumped)`, rc 134).
 
 ### AWG-039 — the unprivileged build step assumes a `doas` rule for the build user
-- Severity: low · State: open · Confidence: confirmed on a lab guest
+- Severity: low · State: fixed-unverified (2026-11-10, `su -m` preferred; native `su(1)` NOT TESTED) · Confidence: confirmed on a lab guest
 - Surface: operational / installation (supply-chain adjacent)
 - Affected: `install.sh:126` —
   `( cd "$dir" && doas -u "$BUILD_USER" sh -c "$cmd" )`.
@@ -655,18 +685,20 @@ soak, coverage-guided fuzzing or performance result is claimed.
   the path's ancestors with `stat(2)` *after* `unveil(NULL, NULL)`. Lookup of a parent outside
   the unveiled subtree returns `ENOENT`, so every `up` (default path and `--config` alike)
   failed with `/etc/amnezia: No such file or directory` while the file was present and
-  correctly owned. Introduced by the trust-chain hardening in the same round (`4a26481`).
+  correctly owned. Introduced by the trust-chain hardening in the same round; that
+  hardening commit belongs to an out-of-tree workspace and resolves in no ref of this
+  repository, so it is not cited here.
 - Fix: the check now matches the confinement the kernel actually enforces — the path must
   begin with `CONF_DIR "/"`, `CONF_DIR` itself is `stat(2)`ed for root ownership and mode, and
   the file is verified through `open(2)`+`fstat(2)` (mode 0600/0400, root-owned, regular). A
   config outside the directory is refused with an explicit message instead of `ENOENT`.
-  Commit `71a02b2`.
+  The fix commit belongs to an out-of-tree workspace and resolves in no ref of this repository, so it is not cited here.
 - Regression test: `tools/lab/awgctl-test.sh` case `up --config` (peer count 2 → add 3 →
   del 2 → up again 2) plus the refusal case; evidence in
   `docs/evidence/2026-11-08/w1-pledge-hunk.log`.
 
 ### AWG-041 — `install.sh` has no host lock: two concurrent runs truncate `/bsd`
-- Severity: high (can leave a host unbootable) · State: open · Confidence: observed
+- Severity: high (can leave a host unbootable) · State: fixed-verified on Linux (2026-11-10, `4d47f85`: dead `verify_lock_held` deleted, in-run takeover refused; native lock paths NOT TESTED) · Confidence: observed
 - Surface: operational / installation
 - Root cause: nothing serialises a second `install.sh` against the first. Observed: the run
   that installed `/bsd` (manifest `installed_bsd_sha256=8770841a…`, `installed_at`
@@ -699,8 +731,7 @@ soak, coverage-guided fuzzing or performance result is claimed.
   on stock `wg0` then failed with `SIOCAIFADDR: File exists`, while a fresh `fd00:78::1/128`
   was accepted by `wg0`. The refusal therefore tracks the address, not the driver. Earlier
   matrix rows that read as AWG IPv6 failures were harness artefacts (no reciprocal IPv6
-  allowed-IPs were installed). Evidence: `reports/w3-addr.md`, commit `e0e5fa0` on
-  `test/network-matrix`. The driver's IPv6 data path is still only partially tested — the
+  allowed-IPs were installed). Evidence: `reports/w3-addr.md` on `test/network-matrix` @ `e0e5fa0`. The driver's IPv6 data path is still only partially tested — the
   dual-stack traffic test is a separate task.
 - **R-3 (from AWG-003) — "no eval needed" applied to all numeric fields.** Only `S1`–`S4` were
   interpolated into `(( ))`; the other numeric fields went to `ifconfig`, which validates them.
@@ -727,11 +758,13 @@ soak, coverage-guided fuzzing or performance result is claimed.
 
 ## Open items — owner-facing decisions
 
-- **AWG-014 — fixed and validated:** the installer no longer runs `make` as root.
+- **AWG-014 — fixed and validated:** the installer no longer runs `make` as root,
+  including the `.OBJDIR` query, which goes through `builder_run` like the builds.
   The builder account compiles, `tree_trust` (symlinks resolved) refuses a tree a
-  third party can write, and root only verifies and installs. Proven by an
-  unprivileged 8.0 build that booted, and by the refusal scenario in the lab
-  rehearsal. See the AWG-014 entry for the residual trust in the builder.
+  third party can write, and root only verifies and installs (the fsync helper is
+  compiled into the root-owned install DB, not the builder-writable work dir).
+  Proven by an unprivileged 8.0 build that booted, and by the refusal scenario in
+  the lab rehearsal. See the AWG-014 entry for the residual trust in the builder.
 - **AWG-029 — fixed and rehearsed:** the kernel and `/sbin/ifconfig` are backed
   up, recorded and restored as a pair, with a documented kernel-only escape hatch
   and a safety copy on every restore. Six disposable-guest scenarios pass.

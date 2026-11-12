@@ -46,6 +46,30 @@ class InstallerR6Staging(unittest.TestCase):
         (w / 'usr' / 'local' / 'sbin').mkdir(parents=True)
         (w / 'usr' / 'share' / 'man' / 'man8').mkdir(parents=True)
         (w / 'etc').mkdir()
+        # Repo source tree for isolated builds (REPODIR override)
+        (w / 'src').mkdir(exist_ok=True)
+        (w / 'sbin' / 'awgctl').mkdir(parents=True, exist_ok=True)
+        (w / 'sbin' / 'ifconfig').mkdir(parents=True, exist_ok=True)
+        (w / 'tools' / 'upstream').mkdir(parents=True, exist_ok=True)
+        # Copy real repo sources needed by install.sh
+        import shutil
+        shutil.copy2(ROOT / 'src' / 'if_awg.h', w / 'src' / 'if_awg.h')
+        shutil.copy2(ROOT / 'src' / 'if_awg.c', w / 'src' / 'if_awg.c')
+        shutil.copy2(ROOT / 'src' / 'awg_noise.h', w / 'src' / 'awg_noise.h')
+        shutil.copy2(ROOT / 'src' / 'awg_noise.c', w / 'src' / 'awg_noise.c')
+        shutil.copy2(ROOT / 'src' / 'AWG.MP', w / 'src' / 'AWG.MP')
+        shutil.copy2(ROOT / 'src' / 'kern_pledge.c.orig', w / 'src' / 'kern_pledge.c.orig')
+        shutil.copy2(ROOT / 'sbin' / 'awgctl' / 'Makefile', w / 'sbin' / 'awgctl' / 'Makefile')
+        shutil.copy2(ROOT / 'sbin' / 'awgctl' / 'awgctl.c', w / 'sbin' / 'awgctl' / 'awgctl.c')
+        shutil.copy2(ROOT / 'sbin' / 'awgctl' / 'awgctl.8', w / 'sbin' / 'awgctl' / 'awgctl.8')
+        shutil.copy2(ROOT / 'sbin' / 'ifconfig' / 'ifconfig_awg.patch', w / 'sbin' / 'ifconfig' / 'ifconfig_awg.patch')
+        shutil.copy2(ROOT / 'sbin' / 'awg-quick', w / 'sbin' / 'awg-quick')
+        shutil.copy2(ROOT / 'tools' / 'verify-release.sh', w / 'tools' / 'verify-release.sh')
+        shutil.copy2(ROOT / 'awg-openbsd.patch', w / 'awg-openbsd.patch')
+        # Copy upstream digest file
+        upstream_file = ROOT / 'tools' / 'upstream' / '8.0.sha256'
+        if upstream_file.exists():
+            shutil.copy2(upstream_file, w / 'tools' / 'upstream' / '8.0.sha256')
         if with_sys_header:
             # A deliberately incompatible *old* header: AWG_KEY_LEN 16 where
             # the shipped header has 32, so the compiled marker names it.
@@ -94,10 +118,14 @@ class InstallerR6Staging(unittest.TestCase):
              'IFCFG_SRC': str(w / 'ifcfg'),
              'STAT_TABLE': str(w / 'table'),
              'OBJDIR': str(w / 'obj'),
+             'BSDOBJDIR': str(w / 'obj'),
+             'RELINK_KERNEL_DIR': str(w / 'usr' / 'share' / 'relink' / 'kernel'),
+             'KERNEL_IDENT': 'AWG.MP',
              'CMDFILE': str(w / 'cmdfile'),
              'SRC_TARBALL': str(w / 'src.tar'),
              'SRC_SIG': str(w / 'SHA256.sig'),
              'SIGNIFY_KEY': str(w / 'etc' / 'signify' / 'openbsd-80-base.pub'),
+             'REPODIR': str(w),
              'PATH': str(SHIMS) + ':' + os.environ['PATH'],
              'TMPDIR': str(w)}
         if mode_env:
@@ -125,7 +153,7 @@ class InstallerR6Staging(unittest.TestCase):
         (w / 'sys' / 'conf' / 'files').write_text(
             'pseudo-device wg: ifnet\nfile net/if_wg.c\t\t\twg\n'
             'file net/wg_cookie.c\t\t\twg\nfile crypto/blake2s.c\t\twg\n'
-            'file crypto/curve25519.c\t\t\twg\nfile crypto/chachapoly.c\t\twg\n')
+            'file crypto/curve25519.c\t\twg\nfile crypto/chachapoly.c\t\twg\n')
         (w / 'ifcfg').mkdir(exist_ok=True)
         (w / 'ifcfg' / 'ifconfig.c').write_text('pristine\n')
 
@@ -285,6 +313,55 @@ class InstallerR6Staging(unittest.TestCase):
             self.assertTrue((w / 'usr' / 'share' / 'man' / 'man8' / 'awgctl.8').exists(),
                             'awgctl.8 must be installed with awgctl')
             self.assertFalse((w / 'if_awg.h').exists())
+
+    # AWG-014 negative control: the builder owns $WORK after
+    # hand_tree_to_builder, so the staged header is writable between the
+    # compile and the publish. The published bytes must be the mutated stage,
+    # which is what the trust boundary (root installs the builder's output)
+    # promises — nothing re-hashes the stage before publishing it.
+    BUILDER_MAKE_MUTATING = ('#!/bin/sh\n'
+                             'printf \'make %s\\n\' "$*" >> "$CMDFILE"\n'
+                             'case "$*" in\n'
+                             '  *-V*.OBJDIR*) echo "$PWD/obj"; exit 0 ;;\n'
+                             'esac\n'
+                             'mkdir -p obj\n'
+                             'inc=""\n'
+                             'for a in "$@"; do\n'
+                             '    case "$a" in\n'
+                             '        CPPFLAGS=-I*) inc="${a#CPPFLAGS=-I}" ;;\n'
+                             '        CPPFLAGS=*)   inc="${a#CPPFLAGS=}" ;;\n'
+                             '    esac\n'
+                             'done\n'
+                             'if [ -n "$inc" ]; then\n'
+                             '    printf \'#define AWG_STR(x) #x\\n#define AWG_XSTR(x) AWG_STR(x)\\n#include <net/if_awg.h>\\nconst char *awg_marker = AWG_XSTR(AWG_KEY_LEN);\\nint main(void) { return 0; }\\n\' > obj/probe.c\n'
+                             '    cc -DIFDESCRSIZE=256 -I"$inc" -S obj/probe.c -o obj/probe.s 2>> "$CMDFILE" || exit 1\n'
+                             '    printf \'/* BUILDER-MUTATION-AFTER-COMPILE */\\n\' >> "$inc/net/if_awg.h"\n'
+                             'fi\n'
+                             'printf \'#!/bin/sh\\n\' > obj/ifconfig\n'
+                             '/bin/chmod 755 obj/ifconfig\n'
+                             'exit 0\n')
+
+    def test_builder_mutation_of_staged_header_is_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d)
+            shims = w / 'builder-shims'
+            shims.mkdir()
+            (shims / 'make').write_text(self.BUILDER_MAKE_MUTATING)
+            (shims / 'make').chmod(0o755)
+            self.sandbox(w)
+            self.tree(w)
+            env = self.env(w)
+            env['PATH'] = str(shims) + ':' + env['PATH']
+            r = self.run_install(w, ['--tools-only'], env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # The build ran as the builder with -I on the private stage, and
+            # the compiler resolved that stage (32, not the legacy 16).
+            self.assertIn('su -m _awgbuild -c make', (w / 'cmdfile').read_text())
+            self.assertEqual(self.compiled_marker(w), '32')
+            published = (w / 'usr' / 'include' / 'net' / 'if_awg.h').read_text()
+            self.assertNotEqual(published, REPO_HEADER)
+            self.assertEqual(published,
+                             REPO_HEADER + '/* BUILDER-MUTATION-AFTER-COMPILE */\n')
 
 
 def hashlib_sha256(path):

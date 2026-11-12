@@ -57,7 +57,8 @@ import subprocess
 import sys
 
 REAL = os.environ.get("ADVERSARY_REAL_IFCONFIG", "$real_ifconfig")
-STATE = os.environ.get("AWGFIX_STATE", "/tmp/awgctl-fixture.state")
+STATE = os.environ.get("AWGFIX_STATE") or os.path.join(
+    os.environ.get("TMPDIR", "/tmp"), "awgctl-fixture.state")
 MTU = os.environ.get("ADVERSARY_MTU", "1419")
 
 rc = subprocess.call([sys.executable, REAL] + sys.argv[1:])
@@ -108,5 +109,5 @@ if [ -n "${AWGCTL_GATE_ADVERSARY_EVIDENCE:-}" ]; then
 	mkdir -p "$AWGCTL_GATE_ADVERSARY_EVIDENCE" &&
 	    cp "$work/clean.log" "$work/injected.log" "$work/guard.log" "$AWGCTL_GATE_ADVERSARY_EVIDENCE/" || exit 2
 fi
-echo 'guard-adversary: VERIFIED built; clean=74/0; injected=72/2; cause=mtu; guard=rejected'
+echo 'guard-adversary: VERIFIED built; clean=81/0; injected=79/2; cause=mtu; guard=rejected'
 exit 1

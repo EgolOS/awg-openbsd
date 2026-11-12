@@ -18,7 +18,7 @@ Conflicts — exactly two files:
 
 The merge also brought `sbin/awgctl/awgctl.8`, `tools/lab/awgctl-test.sh`,
 `tools/lab/fixture-ifconfig.py`, `tools/lab/fixture-stubs.c`,
-`tools/tests/test_awgctl.py`, `tools/tests/test_awgctl_r5.py`, the
+historical: from other branch: `tools/tests/test_awgctl.py`; historical: from other branch: `tools/tests/test_awgctl_r5.py`, the
 `.fixdbg.*` evidence and `reports/w11-r5-*` into the tree.
 
 Verification:

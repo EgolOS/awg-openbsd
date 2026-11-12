@@ -1,5 +1,5 @@
---- /dev/null	Mon Nov  9 07:48:08 2026
-+++ net/if_awg.h	Mon Nov  9 07:48:08 2026
+--- /dev/null	Mon Nov  9 22:51:09 2026
++++ net/if_awg.h	Mon Nov  9 22:51:09 2026
 @@ -0,0 +1,174 @@
 +/*	$OpenBSD: if_awg.h,v 1.1 2026/09/24 00:00:00 truebad0ur Exp $ */
 +
@@ -176,9 +176,9 @@
 +
 +#endif /* __IF_AWG_H__ */
 
---- /dev/null	Mon Nov  9 07:48:08 2026
-+++ net/if_awg.c	Mon Nov  9 07:48:08 2026
-@@ -0,0 +1,4023 @@
+--- /dev/null	Mon Nov  9 22:51:09 2026
++++ net/if_awg.c	Mon Nov  9 22:51:09 2026
+@@ -0,0 +1,4031 @@
 +/*	$OpenBSD: if_awg.c,v 1.2 2026/10/20 00:00:00 truebad0ur Exp $ */
 +
 +/*
@@ -1966,19 +1966,27 @@
 +	uint8_t			buf[1500];
 +	uint16_t		pktlen;
 +	int			i;
++	/* AWG-020: snapshot the junk triple once. The guard and the loop
++	 * below used to re-read jc/jmin/jmax, so a writer in awg_ioctl_set
++	 * could leave a torn pair (jmin new, jmax old): the uint16_t span
++	 * promotes to uint32_t, arc4random_uniform returns up to that
++	 * wrapped bound, and arc4random_buf overruns buf[]. One snapshot
++	 * makes the guard and the loop see the same (jc, jmin, jmax). */
++	uint16_t		jc = sc->sc_awg_jc;
++	uint16_t		jmin = sc->sc_awg_jmin;
++	uint16_t		jmax = sc->sc_awg_jmax;
 +
-+	if (sc->sc_awg_jc == 0 || sc->sc_awg_jmin == 0 ||
-+	    sc->sc_awg_jmax < sc->sc_awg_jmin ||
-+	    sc->sc_awg_jmax > sizeof(buf))
++	if (jc == 0 || jmin == 0 ||
++	    jmax < jmin || jmax > sizeof(buf))
 +		return;
 +
 +	awg_peer_get_endpoint(peer, &endpoint);
-+	for (i = 0; i < sc->sc_awg_jc; i++) {
-+		if (sc->sc_awg_jmin == sc->sc_awg_jmax)
-+			pktlen = sc->sc_awg_jmin;
++	for (i = 0; i < jc; i++) {
++		if (jmin == jmax)
++			pktlen = jmin;
 +		else
-+			pktlen = sc->sc_awg_jmin + (uint16_t)
-+			    arc4random_uniform(sc->sc_awg_jmax - sc->sc_awg_jmin + 1);
++			pktlen = jmin + (uint16_t)
++			    arc4random_uniform(jmax - jmin + 1);
 +		arc4random_buf(buf, pktlen);
 +		awg_send_buf(sc, &endpoint, buf, pktlen);
 +	}
@@ -4203,8 +4211,8 @@
 +			IPL_NET, 0, "awgratelimit", NULL);
 +}
 
---- /dev/null	Mon Nov  9 07:48:08 2026
-+++ net/awg_noise.h	Mon Nov  9 07:48:08 2026
+--- /dev/null	Mon Nov  9 22:51:09 2026
++++ net/awg_noise.h	Mon Nov  9 22:51:09 2026
 @@ -0,0 +1,215 @@
 +/*	$OpenBSD: awg_noise.h,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -4422,8 +4430,8 @@
 +
 +#endif /* __AWG_NOISE_H__ */
 
---- /dev/null	Mon Nov  9 07:48:08 2026
-+++ net/awg_noise.c	Mon Nov  9 07:48:08 2026
+--- /dev/null	Mon Nov  9 22:51:09 2026
++++ net/awg_noise.c	Mon Nov  9 22:51:09 2026
 @@ -0,0 +1,1405 @@
 +/*	$OpenBSD: awg_noise.c,v 1.0 2026/09/24 00:00:00 truebad0ur Exp $ */
 +/*
@@ -5847,8 +5855,8 @@
 @@ crypto/chachapoly.c
 + | awg
 
---- sys/kern/kern_pledge.c	Mon Nov  9 07:48:08 2026
-+++ sys/kern/kern_pledge.c	Mon Nov  9 07:48:08 2026
+--- sys/kern/kern_pledge.c	Mon Nov  9 22:51:09 2026
++++ sys/kern/kern_pledge.c	Mon Nov  9 22:51:09 2026
 @@ -56,6 +56,7 @@
  #include <net/pfvar.h>
  #include <net/frame.h>

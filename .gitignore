@@ -25,6 +25,7 @@ __pycache__/
 # stageable; the unanchored pattern also ignored the whole directory.
 /awgctl
 /sbin/awgctl/awgctl
+/sbin/awgctl/obj/
 manifest.kv
 # R6-N1 lock artifacts: the lock generation directory (gen-<N>) and its CAS
 # slot are runtime state next to $LOCKFILE, not sources.

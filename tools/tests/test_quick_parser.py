@@ -36,7 +36,7 @@ parse_options "$1"
                                   env=env, capture_output=True, text=True)
 
     def test_lists_do_not_expand_filenames(self):
-        r = self.run_parser('[Interface]\nPrivateKey = dummy\nAddress = *, 10.0.0.1/24\nDNS = *.invalid, 1.1.1.1\n[Peer]\nPublicKey = dummy\nAllowedIPs = *\n',
+        r = self.run_parser('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nAddress = *, 10.0.0.1/24\nDNS = *.invalid, 1.1.1.1\n[Peer]\nPublicKey = dummy\nAllowedIPs = *\n',  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
                             'printf "ADDR:%s\\n" "${ADDRESSES[@]}"; printf "DNS:%s\\n" "${DNS_SEARCH[@]}"; REAL_INTERFACE=awg9; ifconfig() { printf "ARG:%s\\n" "$@"; }; build_config_args; apply_config\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('ADDR:*\n', r.stdout)
@@ -44,12 +44,12 @@ parse_options "$1"
         self.assertNotIn('expanded-file', r.stdout)
 
     def test_user_owned_config_is_refused(self):
-        r = self.run_parser('[Interface]\nPrivateKey = dummy\n', 'echo PARSED\n', owner='1000')
+        r = self.run_parser('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n', 'echo PARSED\n', owner='1000')  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn('PARSED', r.stdout)
 
     def test_all_secret_keys_use_stdin_in_argument_order(self):
-        r = self.run_parser('[Interface]\nPrivateKey = dummy\n', '''
+        r = self.run_parser('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\n', '''  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
 PRIVATE_KEY=private-fixture; HPK=header-fixture; PEER_COUNT=1
 PEER_PUBKEYS=(public-fixture); PEER_PSKS=(psk-fixture)
 REAL_INTERFACE=awg9
@@ -64,7 +64,7 @@ apply_config
                          ['STDIN:private-fixture', 'STDIN:header-fixture', 'STDIN:psk-fixture'])
 
     def test_decimal_leading_zero_range(self):
-        r = self.run_parser('[Interface]\nPrivateKey = dummy\nH1 = 08-09\n', 'echo PARSED\n')
+        r = self.run_parser('[Interface]\nPrivateKey = YHdnLWxhYi1rZXktMAAAAAAAAAAAAAAAAAAAAAAAAEA=\nH1 = 08-09\n', 'echo PARSED\n')  # scan:allow-fixture[sha1:79ea366a4c32e5f1bdb33f7079ea4f76b624ca37]
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('PARSED', r.stdout)
 
